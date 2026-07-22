@@ -15,6 +15,7 @@ import {
   mergeDmarc,
   mergeSpf,
   normalizeFqdn,
+  parseDmarc,
   planApex,
   type DkimTemplate,
   type DmarcTags,
@@ -149,6 +150,101 @@ export function planEmailRecords(plan: EmailPlan, existing: DnsRecord[]): PlanRe
   warnings.push(...dmarc.warnings);
 
   return { records, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// resolved records (a caller — e.g. the agent-email side with Resend's records —
+// hands us the ALREADY-RESOLVED record set; we classify + guard before writing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prepare a caller-supplied RESOLVED record set for a merge-safe write. The caller
+ * (agent-email → Resend's Domains API) produces concrete records; we must NOT write
+ * them raw — an existing SPF would permerror, an existing MX would clobber live mail.
+ * So we classify and run the same guards the email plan uses, against `existing`:
+ *   - SPF (v=spf1 TXT)  → fold the caller's mechanisms into the ONE existing SPF record
+ *   - DMARC (v=DMARC1)  → merge, preserving the operator's existing policy
+ *   - MX                → clobber-guard (warn if a live provider already receives mail)
+ *   - everything else (DKIM CNAME/TXT, A/CNAME, …) → passed through, TTL-clamped
+ * Records arrive already mapped to the canonical DnsRecord shape (host relative to
+ * the domain) at the worker boundary.
+ */
+export function planFromResolvedRecords(
+  records: DnsRecord[],
+  existing: DnsRecord[],
+): PlanResult {
+  const warnings: ConnectWarning[] = [];
+  const out: DnsRecord[] = [];
+  const mxByHost = new Map<string, DnsRecord[]>();
+
+  for (const rec of records) {
+    const host = rec.host;
+    const value = rec.value.trim();
+
+    if (rec.type === "TXT" && /^v=spf1(\s|$)/i.test(value)) {
+      // Fold the caller's SPF mechanisms into the single existing SPF (permerror-safe).
+      const additions = value
+        .split(/\s+/)
+        .slice(1)
+        .filter((t) => t !== "" && !/^[-~?+]?all$/i.test(t));
+      const spf = mergeSpf({
+        existingTxt: txtAt(existing, host),
+        additions,
+        ...(rec.ttl !== undefined ? { ttl: rec.ttl } : {}),
+      });
+      out.push({ ...spf.dnsRecord, host, purpose: "spf" });
+      warnings.push(...spf.warnings);
+      continue;
+    }
+
+    if (rec.type === "TXT" && /^v=DMARC1/i.test(value)) {
+      const existingDmarc = txtAt(existing, host).find((t) => /^v=DMARC1/i.test(t.trim()));
+      const tags: DmarcTags = parseDmarc(value);
+      const dmarc = mergeDmarc({
+        ...(existingDmarc !== undefined ? { existingTxt: existingDmarc } : {}),
+        tags,
+        ...(rec.ttl !== undefined ? { ttl: rec.ttl } : {}),
+      });
+      out.push({ ...dmarc.record, host, purpose: "dmarc" });
+      warnings.push(...dmarc.warnings);
+      continue;
+    }
+
+    if (rec.type === "MX") {
+      const arr = mxByHost.get(host) ?? [];
+      arr.push(rec);
+      mxByHost.set(host, arr);
+      continue;
+    }
+
+    // DKIM CNAME/TXT, site A/CNAME, CAA, NS — additive; pass through (TTL clamped by writer).
+    out.push({ ...rec, purpose: rec.purpose ?? classifyPurpose(rec) });
+  }
+
+  for (const [host, mxRecs] of mxByHost) {
+    // Give any MX missing a priority a unique fallback so buildMx never rejects duplicates.
+    const entries: MxEntry[] = mxRecs.map((r, i) => ({
+      priority: r.priority ?? 10 + i,
+      target: r.value,
+    }));
+    const mx = buildMx({
+      entries,
+      existingMx: mxTargetsAt(existing, host),
+      host,
+      ...(mxRecs[0]?.ttl !== undefined ? { ttl: mxRecs[0]!.ttl } : {}),
+    });
+    out.push(...mx.records);
+    warnings.push(...mx.warnings);
+  }
+
+  return { records: out, warnings };
+}
+
+/** Best-effort purpose tag for a passthrough record (DKIM lives under _domainkey). */
+function classifyPurpose(rec: DnsRecord): DnsRecord["purpose"] {
+  if (/_domainkey/i.test(rec.host)) return "dkim";
+  if (rec.type === "A" || rec.type === "AAAA" || rec.type === "CNAME") return "site";
+  return "other";
 }
 
 // ---------------------------------------------------------------------------

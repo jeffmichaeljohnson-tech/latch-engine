@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { DnsRecord } from "../../src/types";
-import { planEmailRecords, planSiteRecords } from "../../src/connect/plan";
+import {
+  planEmailRecords,
+  planFromResolvedRecords,
+  planSiteRecords,
+} from "../../src/connect/plan";
 
 const findByPurpose = (rs: DnsRecord[], p: string) => rs.filter((r) => r.purpose === p);
 
@@ -79,6 +83,43 @@ describe("planEmailRecords", () => {
   it("omits MX entirely for a send-only identity", () => {
     const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
     expect(findByPurpose(records, "mx")).toHaveLength(0);
+  });
+});
+
+describe("planFromResolvedRecords (caller-supplied Resend-style records)", () => {
+  // A Resend-style resolved set already mapped to canonical DnsRecords (host relative).
+  const resend = (host = "send"): DnsRecord[] => [
+    { type: "MX", host, value: "feedback-smtp.us-east-1.amazonses.com", ttl: 3600, priority: 10 },
+    { type: "TXT", host, value: "v=spf1 include:amazonses.com ~all", ttl: 3600 },
+    { type: "CNAME", host: `resend._domainkey.${host}`, value: "resend._domainkey.abc.resend.com", ttl: 3600 },
+    { type: "TXT", host: `_dmarc.${host}`, value: "v=DMARC1; p=none;", ttl: 3600 },
+  ];
+
+  it("folds the caller's SPF into an existing SPF at the same host — no second v=spf1", () => {
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "send", value: "v=spf1 include:_spf.google.com ~all", ttl: 3600 },
+    ];
+    const { records, warnings } = planFromResolvedRecords(resend(), existing);
+    const spf = records.filter((r) => r.purpose === "spf");
+    expect(spf).toHaveLength(1); // ONE merged record, never two
+    expect(spf[0]!.value).toBe("v=spf1 include:_spf.google.com include:amazonses.com ~all");
+    expect(warnings.some((w) => w.code === "existing_spf")).toBe(true);
+  });
+
+  it("clobber-guards MX when a live provider already receives mail at that host", () => {
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "send", value: "aspmx.l.google.com.", ttl: 3600, priority: 1 },
+    ];
+    const { warnings } = planFromResolvedRecords(resend(), existing);
+    expect(warnings.some((w) => w.code === "existing_mx")).toBe(true);
+  });
+
+  it("passes DKIM CNAME + DMARC through (DKIM tagged, DMARC merged) with no existing DNS", () => {
+    const { records } = planFromResolvedRecords(resend(), []);
+    const dkim = records.find((r) => r.type === "CNAME");
+    expect(dkim?.purpose).toBe("dkim");
+    expect(records.some((r) => r.purpose === "dmarc" && r.value.includes("p=none"))).toBe(true);
+    expect(records.some((r) => r.type === "MX")).toBe(true);
   });
 });
 

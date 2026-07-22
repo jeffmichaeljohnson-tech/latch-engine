@@ -26,6 +26,7 @@ import { makeDomainConnectAdapter, type DomainConnectConfig } from "../providers
 import { V1_COVERAGE, adapterIdOf, type CoveragePolicy } from "./coverage";
 import {
   planEmailRecords,
+  planFromResolvedRecords,
   planSiteRecords,
   type EmailPlan,
   type PlanResult,
@@ -162,7 +163,9 @@ async function readCurrent(path: Path, domain: string, deps: ConnectDeps): Promi
 function buildRecords(input: ConnectInput, existing: DnsRecord[]): PlanResult {
   if (input.email) return planEmailRecords(input.email, existing);
   if (input.site) return planSiteRecords(input.site, existing);
-  if (input.records) return { records: input.records, warnings: [] };
+  // Caller-supplied RESOLVED records (e.g. agent-email's Resend set): classify + guard
+  // (SPF merge / MX clobber-guard) against existing DNS — never write them raw.
+  if (input.records) return planFromResolvedRecords(input.records, existing);
   return { records: [], warnings: [] };
 }
 
