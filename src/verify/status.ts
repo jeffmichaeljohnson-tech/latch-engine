@@ -61,28 +61,35 @@ export function recordStatus(obs: RecordObservation): VerifyStatus {
     return confirmed > 0 ? "propagating" : "pending";
   }
 
-  // External zone: public DoH consensus is the best available (recursive) signal.
+  // External zone: public DoH consensus is the best available signal — but it is
+  // RECURSIVE (cache), not authoritative, so it can never earn the strong "published"
+  // gate. Full agreement is the terminal "confirmed" success; partial is "propagating".
   if (total === 0) {
     // No clean answers at all. If every queried resolver hard-errored, that is a
     // hard failure; otherwise nothing was queried → pending.
     return errors > 0 ? "failed" : "pending";
   }
-  if (confirmed >= total) return "published";
+  if (confirmed >= total) return "confirmed";
   if (confirmed > 0) return "propagating";
   return "pending";
 }
 
 /**
  * Roll per-record states up to one overall status.
- *  - any "failed"            → "failed"  (a hard error dominates)
- *  - all "published"         → "published"
- *  - all "pending"           → "pending"
- *  - otherwise (mixed)       → "propagating"
+ *  - any "failed"                       → "failed"     (a hard error dominates)
+ *  - all "published"                    → "published"  (strong authoritative gate)
+ *  - all terminal-success (published or
+ *    "confirmed", at least one weaker)  → "confirmed"  (the weakest terminal wins — honest)
+ *  - all "pending"                      → "pending"
+ *  - otherwise (mixed / any propagating)→ "propagating"
  */
 export function rollupStatus(records: readonly RecordVerifyState[]): VerifyStatus {
   if (records.length === 0) return "pending";
   if (records.some((r) => r.status === "failed")) return "failed";
   if (records.every((r) => r.status === "published")) return "published";
+  if (records.every((r) => r.status === "published" || r.status === "confirmed")) {
+    return "confirmed";
+  }
   if (records.every((r) => r.status === "pending")) return "pending";
   return "propagating";
 }

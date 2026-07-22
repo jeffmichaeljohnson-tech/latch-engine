@@ -178,13 +178,19 @@ export interface ConnectResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Two-tier truth:
- *  - "published"    authoritative source confirms the record (real success gate)
- *  - "propagating"  authoritative confirms but some public resolvers still stale
+ * Verification truth. "published" is the STRONG gate and requires an authoritative
+ * signal (an owned-zone CF-API read-back, or a future authoritative resolver); public
+ * DoH alone can never reach it, because DoH answers from a recursive cache, not the
+ * zone's authoritative nameservers.
+ *  - "published"    authoritative source confirms AND public resolvers agree (strong gate)
+ *  - "confirmed"    confirmed across public resolvers but NOT authoritatively verified —
+ *                   the terminal success state for a zone Latch cannot read authoritatively
+ *                   (external domain, no owned read-back / sidecar). Honestly weaker than published.
+ *  - "propagating"  confirmed by some resolvers but others still serving stale/absent answers
  *  - "pending"      not yet observed
  *  - "failed"       propagation timeout (72h) or a hard error
  */
-export type VerifyStatus = "pending" | "published" | "propagating" | "failed";
+export type VerifyStatus = "pending" | "published" | "confirmed" | "propagating" | "failed";
 
 export interface RecordVerifyState {
   type: DnsRecordType;

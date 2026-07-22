@@ -14,8 +14,8 @@ const obs = (o: Partial<RecordObservation>): RecordObservation => ({
 });
 
 describe("recordStatus — external zone (no authoritative signal)", () => {
-  it("all resolvers confirm → published", () => {
-    expect(recordStatus(obs({ confirmed: 2, total: 2 }))).toBe("published");
+  it("all resolvers confirm → confirmed (public-resolver terminal, NOT the authoritative published gate)", () => {
+    expect(recordStatus(obs({ confirmed: 2, total: 2 }))).toBe("confirmed");
   });
 
   it("some resolvers confirm, others stale → propagating", () => {
@@ -36,10 +36,15 @@ describe("recordStatus — external zone (no authoritative signal)", () => {
     expect(recordStatus(obs({}))).toBe("pending");
   });
 
-  it("one resolver errored but another confirmed → still published", () => {
+  it("one resolver errored but another confirmed → still confirmed", () => {
     expect(recordStatus(obs({ confirmed: 1, total: 1, errors: 1 }))).toBe(
-      "published",
+      "confirmed",
     );
+  });
+
+  it("external agreement NEVER reaches the authoritative 'published' gate", () => {
+    // No authoritative signal → the strongest external outcome is 'confirmed'.
+    expect(recordStatus(obs({ confirmed: 5, total: 5 }))).not.toBe("published");
   });
 });
 
@@ -98,6 +103,14 @@ describe("rollupStatus", () => {
 
   it("all published → published", () => {
     expect(rollupStatus([rec("published"), rec("published")])).toBe("published");
+  });
+
+  it("all confirmed → confirmed", () => {
+    expect(rollupStatus([rec("confirmed"), rec("confirmed")])).toBe("confirmed");
+  });
+
+  it("mixed published + confirmed → confirmed (the weakest terminal wins)", () => {
+    expect(rollupStatus([rec("published"), rec("confirmed")])).toBe("confirmed");
   });
 
   it("all pending → pending", () => {

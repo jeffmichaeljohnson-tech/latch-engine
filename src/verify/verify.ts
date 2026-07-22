@@ -195,7 +195,7 @@ export interface PollDeps {
 
 /**
  * Drive verifyOnce on the backoff schedule until the status is terminal:
- *   - "published" → return it (success gate reached)
+ *   - "published" (authoritative) or "confirmed" (public-resolver terminal) → return it
  *   - hard "failed" from verifyOnce → return it
  *   - schedule exhausted (72h cap) → return the last result forced to "failed"
  * "pending"/"propagating" keep polling. Uses only injected sleep + now.
@@ -218,7 +218,11 @@ export async function pollUntil(
     const stamped: VerifyResult =
       deps.jobId === undefined ? result : { ...result, jobId: deps.jobId };
 
-    if (stamped.status === "published" || stamped.status === "failed") {
+    if (
+      stamped.status === "published" ||
+      stamped.status === "confirmed" ||
+      stamped.status === "failed"
+    ) {
       return stamped;
     }
 

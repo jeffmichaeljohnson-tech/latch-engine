@@ -168,12 +168,12 @@ const SPF: DnsRecord = {
 };
 
 describe("verifyOnce", () => {
-  it("all resolvers confirm → published", async () => {
+  it("all resolvers confirm (external, no authoritative signal) → confirmed", async () => {
     const r = fakeResolver(() => txt("example.com", SPF.value));
     const res = await verifyOnce("example.com", [SPF], r, { endpoints: TWO });
-    expect(res.status).toBe("published");
+    expect(res.status).toBe("confirmed");
     expect(res.records).toHaveLength(1);
-    expect(res.records[0]?.status).toBe("published");
+    expect(res.records[0]?.status).toBe("confirmed");
     expect(res.domain).toBe("example.com");
   });
 
@@ -232,7 +232,7 @@ describe("verifyOnce", () => {
     );
     const res = await verifyOnce("example.com", [SPF, mxRec], r, { endpoints: TWO });
     expect(res.status).toBe("propagating");
-    expect(res.records.map((x) => x.status)).toEqual(["published", "pending"]);
+    expect(res.records.map((x) => x.status)).toEqual(["confirmed", "pending"]);
   });
 });
 
@@ -246,7 +246,7 @@ describe("pollUntil", () => {
     return { sleep: c.sleep, now: c.now, endpoints: TWO, ...over };
   };
 
-  it("returns immediately when already published (no sleep needed)", async () => {
+  it("returns immediately once terminal (external all-confirm → confirmed, no sleep)", async () => {
     const clock = fakeClock();
     const r = fakeResolver(() => txt("example.com", SPF.value));
     const res = await pollUntil("example.com", [SPF], r, {
@@ -254,11 +254,11 @@ describe("pollUntil", () => {
       now: clock.now,
       endpoints: TWO,
     });
-    expect(res.status).toBe("published");
+    expect(res.status).toBe("confirmed");
     expect(clock.at()).toBe(0); // never slept
   });
 
-  it("converges to published after propagation delay", async () => {
+  it("converges to confirmed after propagation delay (external zone)", async () => {
     const clock = fakeClock();
     // Cloudflare always sees it; Google only after 30s of elapsed (propagation lag).
     const r = fakeResolver((_n, _t, endpoint) => {
@@ -270,9 +270,21 @@ describe("pollUntil", () => {
       now: clock.now,
       endpoints: TWO,
     });
-    expect(res.status).toBe("published");
+    expect(res.status).toBe("confirmed");
     expect(clock.at()).toBeGreaterThanOrEqual(30_000);
     expect(clock.at()).toBeLessThan(60_000); // caught in the fast (10s) phase
+  });
+
+  it("reaches the authoritative 'published' gate when an owned-zone read-back confirms", async () => {
+    const clock = fakeClock();
+    const r = fakeResolver(() => txt("example.com", SPF.value));
+    const res = await pollUntil("example.com", [SPF], r, {
+      sleep: clock.sleep,
+      now: clock.now,
+      endpoints: TWO,
+      authoritativeConfirmed: true,
+    });
+    expect(res.status).toBe("published");
   });
 
   it("stamps jobId on the result", async () => {
@@ -314,6 +326,6 @@ describe("pollUntil", () => {
   it("uses deps helper shape without error", async () => {
     const r = fakeResolver(() => txt("example.com", SPF.value));
     const res = await pollUntil("example.com", [SPF], r, deps({}));
-    expect(res.status).toBe("published");
+    expect(res.status).toBe("confirmed");
   });
 });
