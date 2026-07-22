@@ -66,7 +66,9 @@ export interface RecordVars {
 
 /**
  * How Latch will attempt to write for this domain:
- *  - "cloudflare"       zone is in our CF account or the domain's NS is Cloudflare → CF API
+ *  - "cloudflare"       the domain's DNS host is Cloudflare (a CANDIDATE). connect()
+ *                       confirms the zone is in OUR CF account before writing via the
+ *                       CF API; a user-owned CF zone downgrades to domain_connect/manual.
  *  - "domain_connect"   provider advertises Domain Connect sync flow (no client secret)
  *  - "adapter:<id>"     a per-provider adapter (e.g. "adapter:route53")
  *  - "manual"           no automated path → polished manual fallback
@@ -105,6 +107,29 @@ export interface DetectResult {
 // connect(domain, records[])
 // ---------------------------------------------------------------------------
 
+/**
+ * Proof that the caller controls the domain before Latch writes DNS to it.
+ * Every write path establishes control by construction:
+ *  - "cf_account_owned"  the zone is in OUR Cloudflare account (delegation was
+ *                        proven when the zone was added — we can't hold a zone we
+ *                        weren't delegated).
+ *  - "provider_consent"  the user consented at their DNS host (Domain Connect / OAuth).
+ *  - "user_credentials"  the caller supplied the host's own API/IAM credentials.
+ *  - "dns_txt_challenge" a verification TXT the caller was asked to place was observed.
+ * connect() records which proof applied; the public surface can require a specific
+ * kind before writing (fails closed).
+ */
+export type ControlProofKind =
+  | "cf_account_owned"
+  | "provider_consent"
+  | "user_credentials"
+  | "dns_txt_challenge";
+
+export interface ControlProof {
+  kind: ControlProofKind;
+  detail?: string;
+}
+
 export type ConnectStatus = "applied" | "manual_fallback" | "oauth_required";
 
 export interface AppliedRecord extends DnsRecord {
@@ -124,7 +149,9 @@ export type ConnectWarningCode =
   | "spf_lookup_limit"
   | "dnssec_unsigned_path"
   | "apex_cname"
-  | "parked_domain";
+  | "parked_domain"
+  | "manual_fallback"
+  | "provider_error";
 
 export interface ConnectWarning {
   code: ConnectWarningCode;
@@ -141,6 +168,8 @@ export interface ConnectResult {
   jobId: string;
   /** Present when status === "oauth_required". */
   authUrl?: string;
+  /** How control of the domain was established for this write (audit + policy). */
+  controlProof?: ControlProof;
   warnings: ConnectWarning[];
 }
 
@@ -210,6 +239,14 @@ export interface Adapter {
   capabilities(): AdapterCapabilities;
   /** Returns an authorize URL when the adapter needs interactive consent, else null. */
   authUrl?(domain: string, redirectUri: string): Promise<string | null>;
+  /**
+   * Read the zone's current records authoritatively — through the provider's own
+   * API — so connect() can read-before-write for the SPF/DMARC merges and the MX
+   * clobber-guard (public DoH is a stale recursive cache and must not seed a
+   * read-modify-write). Optional: sync/manual adapters that cannot read omit this,
+   * and connect() falls back to a DoH read (best-effort, flagged).
+   */
+  readExisting?(domain: string, auth?: AdapterAuth): Promise<DnsRecord[]>;
   /** Applies records. Throws on hard failure; records it cannot write fall to `manual`. */
   apply(
     domain: string,

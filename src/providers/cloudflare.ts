@@ -75,6 +75,25 @@ export interface CfDnsRecord {
   priority?: number;
 }
 
+/** Full DNS name → canonical host ("@" for the apex). Reverse of toName(). */
+function toHost(name: string, domain: string): string {
+  if (name === domain || name === `${domain}.`) return "@";
+  if (name.endsWith(`.${domain}`)) return name.slice(0, -(domain.length + 1));
+  return name;
+}
+
+/** Map a Cloudflare API record back to the canonical DnsRecord shape. */
+function toDnsRecord(r: CfDnsRecord, domain: string): DnsRecord {
+  const record: DnsRecord = {
+    type: r.type as DnsRecord["type"],
+    host: toHost(r.name, domain),
+    value: r.content,
+    ttl: r.ttl,
+  };
+  if (r.type === "MX" && typeof r.priority === "number") record.priority = r.priority;
+  return record;
+}
+
 interface CfError {
   code: number;
   message: string;
@@ -103,6 +122,27 @@ export const CLOUDFLARE_CAPABILITIES: AdapterCapabilities = {
 export class CloudflareAdapter implements Adapter {
   capabilities(): AdapterCapabilities {
     return CLOUDFLARE_CAPABILITIES;
+  }
+
+  /**
+   * Authoritative read of the zone's current records (for connect()'s read-before-
+   * write merges + MX clobber-guard). One page (per_page=100) — a zone with >100
+   * records would need pagination (flagged; not needed for the email/site record
+   * sets Latch writes).
+   */
+  async readExisting(domain: string, auth?: AdapterAuth): Promise<DnsRecord[]> {
+    const { zoneId, token } = readAuth(auth);
+    const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records?per_page=100`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new LatchError("provider_auth_failed", "Cloudflare rejected the API token.");
+    }
+    const json = (await res.json()) as CfResponse<CfDnsRecord[]>;
+    if (!res.ok || !json.success || !json.result) {
+      throw new LatchError("provider_rejected", cfErrorText(json.errors));
+    }
+    return json.result.map((r) => toDnsRecord(r, domain));
   }
 
   async apply(

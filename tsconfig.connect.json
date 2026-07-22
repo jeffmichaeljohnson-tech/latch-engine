@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/types.ts",
+    "src/net",
+    "src/records",
+    "src/detect",
+    "src/providers",
+    "src/connect",
+    "test/connect"
+  ]
+}

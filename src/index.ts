@@ -4,9 +4,9 @@
 // Consumers import from here; internal modules import their siblings directly.
 
 export * from "./types";
-
-// Lanes append their exports below as they land:
-//   export * from "./records";   // email-DNS intelligence (SPF/DKIM/DMARC/MX)
-//   export * from "./detect";    // provider detection + Domain Connect discovery
-//   export * from "./providers"; // adapter registry + implementations
-//   export * from "./verify";    // DoH poller + two-tier status
+export * from "./net/resolver";
+export * from "./records";
+export * from "./detect";
+export * from "./providers";
+export * from "./verify";
+export * from "./connect";
