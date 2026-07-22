@@ -39,3 +39,20 @@ export {
 } from "./route53";
 
 export { signRequest, type SigV4Input, type SigV4Result } from "./sigv4";
+
+export {
+  validateManifest,
+  manifestAdapter,
+  registerManifestAdapter,
+  KNOWN_PLACEHOLDERS,
+  type AdapterManifest,
+  type ManifestAdapter,
+  type ManifestAdapterOptions,
+  type ManifestCapabilities,
+  type ManifestCreate,
+  type ManifestRead,
+  type ManifestRecordMap,
+  type ManifestRequest,
+  type BodyTemplate,
+  type ValidateResult,
+} from "./manifest";
