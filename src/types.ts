@@ -1,0 +1,240 @@
+// Latch — canonical contract types for the DNS-automation engine.
+//
+// This is the single source of truth for the detect / connect / verify seam and
+// the internal record shape. Per the repo's "transform once at the boundary" rule,
+// external/wire shapes (Cloudflare API structs, Domain Connect params, Route 53
+// change-sets, provider JSON) are converted to THESE types at the edge that
+// receives them, then passed everywhere. No module deeper than an adapter should
+// ever read a raw provider shape.
+//
+// Owned by the orchestrator. Lanes extend behavior in ./records, ./detect,
+// ./providers, ./verify — they do not redefine these types.
+
+// ---------------------------------------------------------------------------
+// DNS records
+// ---------------------------------------------------------------------------
+
+/** DNS record types Latch can write. */
+export type DnsRecordType = "A" | "AAAA" | "CNAME" | "CAA" | "MX" | "TXT" | "NS";
+
+/**
+ * Semantic purpose of a record. Drives email-DNS intelligence:
+ * "spf"/"dkim"/"dmarc"/"mx" get the merge / chunk / clobber-guard / policy logic;
+ * "site" is a plain A/AAAA/CNAME for pointing a domain at a published site.
+ */
+export type RecordPurpose =
+  | "mx"
+  | "spf"
+  | "dkim"
+  | "dmarc"
+  | "site"
+  | "verification"
+  | "other";
+
+/**
+ * The canonical record shape. `value` may still contain dynamic variables
+ * (see RecordVars) before the engine resolves them; `host` is "@" for the apex
+ * or a subdomain label / FQDN.
+ */
+export interface DnsRecord {
+  type: DnsRecordType;
+  host: string;
+  value: string;
+  /** Minimum 300 (enforced by the engine). */
+  ttl: number;
+  /** MX only. */
+  priority?: number;
+  purpose?: RecordPurpose;
+}
+
+/**
+ * Dynamic variables the engine substitutes into record `value`/`host` before write.
+ * Uppercase + case-sensitive, matching the Entri-parity SDK contract.
+ * `emailProviderSPF` resolves to the detected sending provider's include token.
+ */
+export interface RecordVars {
+  DOMAIN: string;
+  SUBDOMAIN: string;
+  SLD: string;
+  TLD: string;
+  emailProviderSPF?: string;
+}
+
+// ---------------------------------------------------------------------------
+// detect(domain)
+// ---------------------------------------------------------------------------
+
+/**
+ * How Latch will attempt to write for this domain:
+ *  - "cloudflare"       zone is in our CF account or the domain's NS is Cloudflare → CF API
+ *  - "domain_connect"   provider advertises Domain Connect sync flow (no client secret)
+ *  - "adapter:<id>"     a per-provider adapter (e.g. "adapter:route53")
+ *  - "manual"           no automated path → polished manual fallback
+ */
+export type DetectMethod =
+  | "cloudflare"
+  | "domain_connect"
+  | `adapter:${string}`
+  | "manual";
+
+export interface DetectResult {
+  domain: string;
+  /** Human name of the detected DNS host ("Cloudflare", "GoDaddy", …) or null. */
+  dnsHost: string | null;
+  method: DetectMethod;
+  /** Present when the method needs an OAuth/consent redirect. */
+  authUrl?: string;
+  /** 0..1 confidence in the detection. */
+  confidence: number;
+  /** Zone is DNSSEC-signed → write only through a signing-aware host API. */
+  dnssec: boolean;
+  /** Domain resolves to a delegated zone. */
+  registered: boolean;
+  /** NS/apex points at a parking or for-sale service. */
+  parked: boolean;
+  /**
+   * Present MX targets. Non-empty ⇒ a live mail provider already receives mail;
+   * connect() must not silently clobber it (emits an `existing_mx` warning).
+   */
+  existingMx: string[];
+  /** Authoritative nameservers observed for the zone. */
+  nameservers: string[];
+}
+
+// ---------------------------------------------------------------------------
+// connect(domain, records[])
+// ---------------------------------------------------------------------------
+
+export type ConnectStatus = "applied" | "manual_fallback" | "oauth_required";
+
+export interface AppliedRecord extends DnsRecord {
+  /** Provider's record id, when the adapter returns one. */
+  recordId?: string;
+}
+
+export interface ManualRecord extends DnsRecord {
+  /** Already merged / chunked / normalized — safe to display verbatim. */
+  note?: string;
+}
+
+export type ConnectWarningCode =
+  | "existing_mx"
+  | "existing_dmarc"
+  | "existing_spf"
+  | "spf_lookup_limit"
+  | "dnssec_unsigned_path"
+  | "apex_cname"
+  | "parked_domain";
+
+export interface ConnectWarning {
+  code: ConnectWarningCode;
+  detail: string;
+}
+
+export interface ConnectResult {
+  domain: string;
+  status: ConnectStatus;
+  applied: AppliedRecord[];
+  /** Records the user must add by hand (manual_fallback) or confirm (e.g. MX clobber). */
+  manual: ManualRecord[];
+  /** Correlates verify() + webhooks. */
+  jobId: string;
+  /** Present when status === "oauth_required". */
+  authUrl?: string;
+  warnings: ConnectWarning[];
+}
+
+// ---------------------------------------------------------------------------
+// verify(domain, jobId?)
+// ---------------------------------------------------------------------------
+
+/**
+ * Two-tier truth:
+ *  - "published"    authoritative source confirms the record (real success gate)
+ *  - "propagating"  authoritative confirms but some public resolvers still stale
+ *  - "pending"      not yet observed
+ *  - "failed"       propagation timeout (72h) or a hard error
+ */
+export type VerifyStatus = "pending" | "published" | "propagating" | "failed";
+
+export interface RecordVerifyState {
+  type: DnsRecordType;
+  host: string;
+  status: VerifyStatus;
+}
+
+export interface VerifyResult {
+  domain: string;
+  jobId?: string;
+  status: VerifyStatus;
+  records: RecordVerifyState[];
+}
+
+// ---------------------------------------------------------------------------
+// Provider adapters
+// ---------------------------------------------------------------------------
+
+export type AdapterAuthKind =
+  | "none"
+  | "oauth"
+  | "api_key"
+  | "iam"
+  | "domain_connect_sync";
+
+export interface AdapterCapabilities {
+  /** "cloudflare" | "route53" | "namecheap" | "domain-connect" | … */
+  id: string;
+  displayName: string;
+  /** Can it write records without manual user steps? */
+  automated: boolean;
+  authKind: AdapterAuthKind;
+  writesRecordTypes: DnsRecordType[];
+  /** ALIAS / CNAME-flattening available at the apex? */
+  supportsApex: boolean;
+}
+
+/**
+ * Opaque credential bag, resolved at the boundary (secrets::resolver on the
+ * sidecar, or worker env). The engine never inspects its internals.
+ */
+export interface AdapterAuth {
+  [k: string]: unknown;
+}
+
+export interface AdapterApplyResult {
+  applied: AppliedRecord[];
+  manual: ManualRecord[];
+}
+
+export interface Adapter {
+  capabilities(): AdapterCapabilities;
+  /** Returns an authorize URL when the adapter needs interactive consent, else null. */
+  authUrl?(domain: string, redirectUri: string): Promise<string | null>;
+  /** Applies records. Throws on hard failure; records it cannot write fall to `manual`. */
+  apply(
+    domain: string,
+    records: DnsRecord[],
+    auth?: AdapterAuth,
+  ): Promise<AdapterApplyResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+export type LatchErrorCode =
+  | "unregistered_domain"
+  | "not_delegated"
+  | "provider_auth_failed"
+  | "provider_rejected"
+  | "unsupported"
+  | "internal";
+
+export class LatchError extends Error {
+  readonly code: LatchErrorCode;
+  constructor(code: LatchErrorCode, message: string) {
+    super(message);
+    this.name = "LatchError";
+    this.code = code;
+  }
+}
