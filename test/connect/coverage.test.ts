@@ -2,12 +2,17 @@ import { describe, expect, it } from "vitest";
 import { V1_COVERAGE, adapterIdOf, isWired } from "../../src/connect/coverage";
 
 describe("coverage policy", () => {
-  it("wires Cloudflare, Domain Connect, and Route53 in v1; Namecheap and manual are not", () => {
+  it("wires Cloudflare + Route53 in v1; Domain Connect, Namecheap, and manual are not", () => {
     expect(isWired("cloudflare", V1_COVERAGE)).toBe(true);
-    expect(isWired("domain_connect", V1_COVERAGE)).toBe(true);
     expect(isWired("adapter:route53", V1_COVERAGE)).toBe(true);
+    // Domain Connect is off until the gbuild-email template is authored + registered.
+    expect(isWired("domain_connect", V1_COVERAGE)).toBe(false);
     expect(isWired("adapter:namecheap", V1_COVERAGE)).toBe(false);
     expect(isWired("manual", V1_COVERAGE)).toBe(false);
+  });
+
+  it("Domain Connect re-wires with a one-flag flip once its template is live", () => {
+    expect(isWired("domain_connect", { ...V1_COVERAGE, domainConnect: true })).toBe(true);
   });
 
   it("extracts the adapter id from an adapter:<id> method", () => {

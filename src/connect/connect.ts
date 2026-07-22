@@ -107,34 +107,51 @@ async function resolvePath(
   return { kind: "manual", reason: "no automated path for this DNS host" };
 }
 
-/** Read current records authoritatively via the write adapter; DoH fallback for manual. */
-async function readCurrent(path: Path, domain: string, deps: ConnectDeps): Promise<DnsRecord[]> {
-  const viaAdapter = async (id: string, auth: AdapterAuth | undefined): Promise<DnsRecord[] | null> => {
+interface CurrentRead {
+  records: DnsRecord[];
+  /** True when a WRITE path's authoritative read threw — the caller must not write blind. */
+  authoritativeFailed: boolean;
+}
+
+/**
+ * Read current records for the merges. On a write path, try the adapter's
+ * AUTHORITATIVE read first and distinguish three outcomes:
+ *   - records        the read succeeded → merge against them
+ *   - "no-method"    the adapter can't read → fall through to best-effort DoH
+ *   - "failed"       the authoritative read THREW → signal authoritativeFailed so
+ *                    connect() degrades to manual instead of writing against a
+ *                    stale/[] view (a transient CF read failure must not clobber MX).
+ */
+async function readCurrent(path: Path, domain: string, deps: ConnectDeps): Promise<CurrentRead> {
+  const viaAdapter = async (
+    id: string,
+    auth: AdapterAuth | undefined,
+  ): Promise<DnsRecord[] | "no-method" | "failed"> => {
     const adapter = deps.getAdapter(id);
-    if (!adapter?.readExisting) return null;
+    if (!adapter?.readExisting) return "no-method";
     try {
       return await adapter.readExisting(domain, auth);
     } catch {
-      return null; // fall through to DoH
+      return "failed";
     }
   };
 
-  if (path.kind === "cloudflare") {
-    const r = await viaAdapter("cloudflare", path.auth);
-    if (r) return r;
-  } else if (path.kind === "adapter") {
-    const r = await viaAdapter(path.adapterId, path.auth);
-    if (r) return r;
+  if (path.kind === "cloudflare" || path.kind === "adapter") {
+    const id = path.kind === "cloudflare" ? "cloudflare" : path.adapterId;
+    const r = await viaAdapter(id, path.auth);
+    if (r === "failed") return { records: [], authoritativeFailed: true };
+    if (r !== "no-method") return { records: r, authoritativeFailed: false };
+    // no readExisting → fall through to best-effort DoH
   }
 
   if (deps.readExistingViaDns) {
     try {
-      return await deps.readExistingViaDns(domain);
+      return { records: await deps.readExistingViaDns(domain), authoritativeFailed: false };
     } catch {
-      return [];
+      return { records: [], authoritativeFailed: false };
     }
   }
-  return [];
+  return { records: [], authoritativeFailed: false };
 }
 
 function buildRecords(input: ConnectInput, existing: DnsRecord[]): PlanResult {
@@ -167,14 +184,33 @@ export async function connect(input: ConnectInput, deps: ConnectDeps): Promise<C
   const jobId = deps.newJobId();
 
   const path = await resolvePath(input.detect, coverage, deps);
-  const existing = await readCurrent(path, domain, deps);
-  const plan = buildRecords(input, existing);
+  const current = await readCurrent(path, domain, deps);
+  const plan = buildRecords(input, current.records);
   const warnings = [...plan.warnings];
   const records = plan.records;
 
   // Never dead-end.
   if (path.kind === "manual") {
     return manualResult(domain, records, jobId, warnings, path.reason);
+  }
+
+  // A write path whose authoritative read failed: do NOT write against an unknown
+  // zone state (the SPF/DMARC merge + MX clobber-guard would be blind). Degrade to
+  // manual with the planned records so the user can add them safely.
+  if (current.authoritativeFailed) {
+    return manualResult(
+      domain,
+      records,
+      jobId,
+      [
+        ...warnings,
+        {
+          code: "provider_error",
+          detail: "Could not read your current DNS to merge safely — add the records manually.",
+        },
+      ],
+      "authoritative read failed",
+    );
   }
 
   const controlProof = input.controlProof ?? path.proof;

@@ -20,12 +20,17 @@ export interface CoveragePolicy {
 }
 
 /**
- * v1 coverage (confirmed with JJ 2026-07-21): Cloudflare-owned + Domain Connect
- * sync + Route 53 fast-follow. Namecheap → manual fallback.
+ * v1 coverage (confirmed with JJ 2026-07-21): Cloudflare-owned + Route 53 fast-follow.
+ * Namecheap → manual fallback.
+ *
+ * domainConnect is OFF until GBuild authors + registers the "gbuild-email" Domain
+ * Connect template with the provider network — without that template the sync-apply
+ * URL cannot apply, so advertising an automated DC flow would over-claim. The engine's
+ * DC mechanism is fully built + tested; flip this to true once the template is live.
  */
 export const V1_COVERAGE: CoveragePolicy = {
   cloudflare: true,
-  domainConnect: true,
+  domainConnect: false,
   route53: true,
   namecheap: false,
 };

@@ -94,6 +94,8 @@ describe("connect() orchestrator", () => {
 
   it("domain_connect → oauth_required with the built sync-apply URL and provider_consent proof", async () => {
     const deps: ConnectDeps = {
+      // DC is off in V1_COVERAGE (no template yet); override to exercise the mechanism.
+      coverage: { cloudflare: true, domainConnect: true, route53: true, namecheap: false },
       getAdapter: () => undefined,
       domainConnectConfig: () => ({
         providerId: "GoDaddy",
@@ -163,6 +165,32 @@ describe("connect() orchestrator", () => {
     expect(res.status).toBe("manual_fallback");
     expect(res.warnings.some((w) => w.code === "provider_error")).toBe(true);
     expect(res.manual.length).toBeGreaterThan(0);
+  });
+
+  it("degrades to manual when the authoritative read FAILS on a write path (no blind write)", async () => {
+    const throwingRead: Adapter = {
+      capabilities: () => CLOUDFLARE_CAPABILITIES,
+      readExisting: async () => {
+        throw new LatchError("provider_rejected", "transient read failure");
+      },
+      apply: async (_domain, records): Promise<AdapterApplyResult> => ({
+        applied: records.map((r) => ({ ...r })),
+        manual: [],
+      }),
+    };
+    const deps: ConnectDeps = {
+      getAdapter: (id) => (id === "cloudflare" ? throwingRead : undefined),
+      resolveOwnedCloudflareZone: async () => ({ zoneId: "z", token: "t" }),
+      readExistingViaDns: async () => [],
+      newJobId: () => "j",
+    };
+    const res = await connect(
+      { detect: det("cloudflare"), email: { subdomain: "agent", spfIncludes: [] } },
+      deps,
+    );
+    expect(res.status).toBe("manual_fallback");
+    expect(res.warnings.some((w) => w.code === "provider_error")).toBe(true);
+    expect(res.applied).toHaveLength(0); // apply must never have run
   });
 
   it("honors a caller-supplied control proof", async () => {
