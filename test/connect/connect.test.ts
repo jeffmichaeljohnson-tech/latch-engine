@@ -75,6 +75,22 @@ describe("connect() orchestrator", () => {
     expect(spf.value).toBe("v=spf1 include:_spf.google.com include:_spf.resend.com ~all");
   });
 
+  it("ownership WINS: an owned CF zone writes via CF even when detect says domain_connect", async () => {
+    const adapter = fakeAdapter({});
+    const deps: ConnectDeps = {
+      getAdapter: (id) => (id === "cloudflare" ? adapter : undefined),
+      resolveOwnedCloudflareZone: async () => ({ zoneId: "z", token: "t" }),
+      newJobId: () => "j",
+    };
+    // detect surfaced domain_connect (CF advertises _domainconnect), but we own the zone.
+    const res = await connect(
+      { detect: det("domain_connect", { dnsHost: "Cloudflare" }), email: { subdomain: "agent", spfIncludes: [] } },
+      deps,
+    );
+    expect(res.status).toBe("applied");
+    expect(res.controlProof).toEqual({ kind: "cf_account_owned" });
+  });
+
   it("Cloudflare NS but NOT in our account → manual fallback, no control proof (P0-3)", async () => {
     const deps: ConnectDeps = {
       getAdapter: () => fakeAdapter({}),

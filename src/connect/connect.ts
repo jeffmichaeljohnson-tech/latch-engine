@@ -75,15 +75,20 @@ async function resolvePath(
   coverage: CoveragePolicy,
   deps: ConnectDeps,
 ): Promise<Path> {
+  // Ownership WINS over the detected method: if the zone is in OUR CF account we
+  // write directly via the CF adapter regardless of what detect() surfaced (a
+  // CF-hosted zone advertises _domainconnect, so detect may say domain_connect —
+  // but for a zone we manage we need no user consent). Checked first so an owned
+  // zone never falls to manual just because DC discovery happened to succeed.
+  if (coverage.cloudflare && deps.resolveOwnedCloudflareZone) {
+    const auth = await deps.resolveOwnedCloudflareZone(detect.domain);
+    if (auth) return { kind: "cloudflare", auth, proof: { kind: "cf_account_owned" } };
+  }
+
   const method = detect.method;
 
   if (method === "cloudflare") {
-    if (!coverage.cloudflare) return { kind: "manual", reason: "Cloudflare path disabled" };
-    const auth = deps.resolveOwnedCloudflareZone
-      ? await deps.resolveOwnedCloudflareZone(detect.domain)
-      : null;
-    if (auth) return { kind: "cloudflare", auth, proof: { kind: "cf_account_owned" } };
-    // NS is Cloudflare but the zone is NOT in our account — we cannot write it.
+    // NS is Cloudflare but the zone is NOT in our account (ownership checked above).
     return { kind: "manual", reason: "Cloudflare-hosted but not in this account" };
   }
 
