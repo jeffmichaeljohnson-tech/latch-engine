@@ -22,8 +22,8 @@ npm install
 npx vitest run
 ```
 
-19 files, **215 tests**, **447 assertions**, all passing. The two numbers count
-different things: 215 `it()` blocks, and 447 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
+21 files, **229 tests**, **465 assertions**, all passing. The two numbers count
+different things: 229 `it()` blocks, and 465 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
 
 ## Mutation
 
@@ -34,10 +34,12 @@ code were wrong. So the mutations are committed, not described:
 npm run mutation
 ```
 
-`mutations.json` lists nineteen changes to real logic — DNS record type codes, the
-SPF qualifier regex, DMARC tag ordering, TTL clamping, the MX duplicate-preference
-check, and every branch of the DNSSEC detector. The runner applies each one,
-runs the suite, restores the file and verifies the restore by hash.
+`mutations.json` lists twenty-three changes to real logic — DNS record type codes,
+the SPF qualifier regex, DMARC tag ordering, TTL clamping, the MX
+duplicate-preference check, every branch of the DNSSEC detector, both halves of
+the multi-string TXT decoder, and the Cloudflare and Namecheap write paths. The
+runner applies each one, runs the suite, restores the file and verifies the
+restore by hash.
 
 It reports four verdicts, and the third is why it exists:
 
