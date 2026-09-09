@@ -154,15 +154,53 @@ export class CloudflareAdapter implements Adapter {
     const applied: AppliedRecord[] = [];
     const manual: ManualRecord[] = [];
 
+    // UPSERT, not create.
+    //
+    // This used to POST every record unconditionally. The engine's whole reason
+    // for reading the zone first is to MERGE — `mergeSpf` folds our include into
+    // whatever SPF is already there and returns one record — and then the writer
+    // created that merged record BESIDE the original it had just merged from.
+    // Two `v=spf1` TXTs at the apex is an RFC 7208 permerror: all mail fails.
+    // The call returned `status: "applied"`.
+    //
+    // So the existing set is fetched once and keyed by (type, name). A match is
+    // PUT; anything else is POST. Route 53 has always done this (it UPSERTs) and
+    // Namecheap does it by union — Cloudflare, the only provider enabled by
+    // default, was the one that did not.
+    const existingById = new Map<string, string>();
+    {
+      const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records?per_page=100`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new LatchError("provider_auth_failed", "Cloudflare rejected the API token.");
+      }
+      const json = (await res.json()) as CfResponse<CfDnsRecord[]>;
+      // A zone we cannot read is a zone we must not blind-write into: falling
+      // back to POST here is exactly the duplicate-SPF bug, one level quieter.
+      if (!res.ok || !json.success || !json.result) {
+        throw new LatchError("provider_rejected", cfErrorText(json.errors));
+      }
+      for (const r of json.result) existingById.set(`${r.type}\u0000${r.name}`, r.id);
+    }
+
     for (const record of records) {
-      const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
-        method: "POST",
+      const body = toCfBody(record, domain);
+      const key = `${body.type}\u0000${body.name}`;
+      const existingId = existingById.get(key);
+      const res = await fetch(
+        existingId
+          ? `${CF_API}/zones/${zoneId}/dns_records/${existingId}`
+          : `${CF_API}/zones/${zoneId}/dns_records`,
+        {
+        method: existingId ? "PUT" : "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(toCfBody(record, domain)),
-      });
+        body: JSON.stringify(body),
+      },
+      );
 
       // Auth failure is a hard failure for the whole batch — stop and throw.
       if (res.status === 401 || res.status === 403) {

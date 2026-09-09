@@ -6,6 +6,7 @@
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { runOne, runAll, report, checkBaseline, KILLED, SURVIVED, INCONCLUSIVE, NOT_APPLIED }
   from './mutation-runner.mjs';
 
@@ -173,13 +174,56 @@ t('an INCONCLUSIVE result is called out, not quietly counted', () => {
   rmSync(d, { recursive: true });
 });
 
-t('a missing `ran` marker in the spec does not silently make everything KILLED', () => {
+t('a spec with NO `ran` marker is REFUSED, not quietly defaulted', () => {
+  // Found by a red team. This used to default to `new RegExp('.')`, which
+  // matches any non-empty output -- so omitting the field turned every non-zero
+  // exit back into KILLED, including a syntax error under which no test ran.
+  // The guarantee this module exists to provide was opt-out by omission, and
+  // the test that claimed to cover it covered a different case.
   const d = fixture();
-  // With no marker declared the default matches anything, so the verdict is
-  // driven purely by exit code. That is the OLD behaviour, and it is why every
-  // shipped spec declares a marker.
-  eq(runOne(d, spec({ ran: undefined }), exec('anything', 1)).verdict, KILLED, 'verdict');
+  let threw = null;
+  try { runOne(d, spec({ ran: undefined }), exec('anything', 1)); }
+  catch (e) { threw = e.message; }
+  assert(threw, 'a spec with no marker was accepted');
+  assert(/no `ran` marker/.test(threw), `unhelpful message: ${threw}`);
+  eq(readFileSync(path.join(d, 'a.js'), 'utf8'), SRC, 'the refusal still left the file untouched');
   rmSync(d, { recursive: true });
+});
+
+t('a syntax error with no marker cannot be scored as KILLED', () => {
+  // The concrete case the red team demonstrated: an unparseable file, zero tests
+  // run, and the old runner called it a kill.
+  const d = fixture();
+  let threw = false;
+  try {
+    runOne(d, { name: 'syntax error', file: 'a.js', find: 'const LIMIT = 10;',
+                replace: 'const LIMIT = ((((;' }, exec('SyntaxError: Unexpected token', 1));
+  } catch { threw = true; }
+  assert(threw, 'a markerless syntax-error mutation was scored instead of refused');
+  rmSync(d, { recursive: true });
+});
+
+t('a replacement identical to the find string is NOT-APPLIED, never SURVIVED', () => {
+  // A mutation that changes nothing cannot tell you anything about coverage.
+  const d = fixture();
+  const r = runOne(d, spec({ replace: 'const LIMIT = 10;' }), exec('Tests  1 passed', 0));
+  eq(r.verdict, NOT_APPLIED, 'verdict');
+  assert(/changes nothing/.test(r.note), r.note);
+  rmSync(d, { recursive: true });
+});
+
+t('the CLI entry point survives a path containing a space', () => {
+  // Found by red team: `import.meta.url` percent-encodes and `process.argv[1]`
+  // does not, so `file://` + argv never matched on such a path. The CLI block
+  // never ran and the process exited 0 having printed nothing -- a mutation
+  // step that reports success having tested nothing.
+  const spaced = mkdtempSync(path.join(tmpdir(), 'mut with space-'));
+  const url = pathToFileURL(path.join(spaced, 'runner.mjs')).href;
+  assert(url.includes('%20'), 'the probe path did not actually contain a space');
+  assert(url !== `file://${path.join(spaced, 'runner.mjs')}`,
+    'string concatenation happened to match, so this test proves nothing');
+  eq(url, pathToFileURL(path.join(spaced, 'runner.mjs')).href, 'pathToFileURL is not stable');
+  rmSync(spaced, { recursive: true });
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

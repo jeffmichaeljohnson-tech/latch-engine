@@ -9,6 +9,32 @@ import type { DnsRecord } from "../../src/types";
 
 const AUTH = { zoneId: "zone123", token: "cf-token-secret" };
 
+/** The zone listing `apply` reads before it decides PUT vs POST. */
+function cfList(records: Array<{ id: string; type: string; name: string }> = []): Response {
+  return new Response(
+    JSON.stringify({ success: true, errors: [], result: records }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
+ * Wrap a write-only stub so it also answers the leading zone read.
+ * `existing` seeds records already in the zone, which is what makes `apply`
+ * choose PUT.
+ */
+function withZoneRead(
+  existing: Array<{ id: string; type: string; name: string }>,
+  onWrite: (input: string | URL, init?: RequestInit) => Promise<Response>,
+) {
+  // Routed on the request SHAPE, not on call order: the zone read is the only
+  // GET, so this keeps working across mockClear() and repeated applies.
+  return async (input: string | URL, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (method === "GET") return cfList(existing);
+    return onWrite(input, init);
+  };
+}
+
 function cfOk(id: string): Response {
   return new Response(
     JSON.stringify({ success: true, errors: [], result: { id } }),
@@ -25,7 +51,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("CloudflareAdapter.apply", () => {
   it("maps a record to a CF DNS create and parses the returned id", async () => {
-    const fetchMock = fetchFn(async () => cfOk("rec-abc"));
+    const fetchMock = fetchFn(withZoneRead([], async () => cfOk("rec-abc")));
     vi.stubGlobal("fetch", fetchMock);
 
     const record: DnsRecord = {
@@ -37,8 +63,8 @@ describe("CloudflareAdapter.apply", () => {
     };
     const out = await new CloudflareAdapter().apply("example.com", [record], AUTH);
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1]!;
     expect(url).toBe(
       "https://api.cloudflare.com/client/v4/zones/zone123/dns_records",
     );
@@ -60,7 +86,7 @@ describe("CloudflareAdapter.apply", () => {
   });
 
   it("builds an FQDN for a subdomain host and includes MX priority", async () => {
-    const fetchMock = fetchFn(async () => cfOk("mx-1"));
+    const fetchMock = fetchFn(withZoneRead([], async () => cfOk("mx-1")));
     vi.stubGlobal("fetch", fetchMock);
 
     const record: DnsRecord = {
@@ -72,7 +98,7 @@ describe("CloudflareAdapter.apply", () => {
       purpose: "mx",
     };
     await new CloudflareAdapter().apply("example.com", [record], AUTH);
-    const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string);
+    const body = JSON.parse(fetchMock.mock.calls[1]![1]!.body as string);
     expect(body.name).toBe("example.com");
     expect(body.priority).toBe(10);
 
@@ -84,7 +110,7 @@ describe("CloudflareAdapter.apply", () => {
     };
     fetchMock.mockClear();
     await new CloudflareAdapter().apply("example.com", [record2], AUTH);
-    const body2 = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string);
+    const body2 = JSON.parse(fetchMock.mock.calls[1]![1]!.body as string);
     expect(body2.name).toBe("mail.example.com");
   });
 
@@ -103,7 +129,7 @@ describe("CloudflareAdapter.apply", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
-        async () =>
+        withZoneRead([], async () =>
           new Response(
             JSON.stringify({
               success: false,
@@ -112,6 +138,7 @@ describe("CloudflareAdapter.apply", () => {
             }),
             { status: 400 },
           ),
+        ),
       ),
     );
     const record: DnsRecord = { type: "A", host: "@", value: "1.2.3.4", ttl: 300 };
@@ -119,6 +146,80 @@ describe("CloudflareAdapter.apply", () => {
     expect(out.applied).toHaveLength(0);
     expect(out.manual).toHaveLength(1);
     expect(out.manual[0]!.note).toContain("81057");
+  });
+
+  it("UPDATES a matching record instead of creating a second one", async () => {
+    // The bug this pins: apply() used to POST unconditionally. The engine reads
+    // the zone precisely so it can MERGE — mergeSpf folds our include into the
+    // SPF already there and returns one record — and the writer then created
+    // that merged record BESIDE the original. Two v=spf1 TXTs at the apex is an
+    // RFC 7208 permerror: all mail fails. And the call returned "applied".
+    const fetchMock = fetchFn(
+      withZoneRead(
+        [{ id: "existing-spf", type: "TXT", name: "example.com" }],
+        async () => cfOk("existing-spf"),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const merged: DnsRecord = {
+      type: "TXT",
+      host: "@",
+      value: "v=spf1 include:old.example include:new.example ~all",
+      ttl: 300,
+      purpose: "spf",
+    };
+    const out = await new CloudflareAdapter().apply("example.com", [merged], AUTH);
+
+    const writes = fetchMock.mock.calls.filter(([, init]) => (init?.method ?? "GET") !== "GET");
+    expect(writes).toHaveLength(1);
+    const [url, init] = writes[0]!;
+    expect(init!.method).toBe("PUT");
+    expect(url).toBe(
+      "https://api.cloudflare.com/client/v4/zones/zone123/dns_records/existing-spf",
+    );
+    expect(out.applied).toHaveLength(1);
+    expect(out.manual).toHaveLength(0);
+  });
+
+  it("CREATES when nothing matches, so the upsert is not a blanket update", async () => {
+    // The must-not-fire half. An adapter that only ever PUT would pass the test
+    // above and be unable to add a record at all.
+    const fetchMock = fetchFn(
+      withZoneRead(
+        [{ id: "unrelated", type: "A", name: "example.com" }],
+        async () => cfOk("new-dmarc"),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const record: DnsRecord = {
+      type: "TXT",
+      host: "_dmarc",
+      value: "v=DMARC1; p=none",
+      ttl: 300,
+      purpose: "dmarc",
+    };
+    await new CloudflareAdapter().apply("example.com", [record], AUTH);
+
+    const writes = fetchMock.mock.calls.filter(([, init]) => (init?.method ?? "GET") !== "GET");
+    expect(writes[0]![1]!.method).toBe("POST");
+  });
+
+  it("refuses to write into a zone it could not read", async () => {
+    // Falling back to a blind create here would be the duplicate-SPF bug again,
+    // one level quieter: a merge computed from an empty view of the zone.
+    vi.stubGlobal(
+      "fetch",
+      fetchFn(async (_i, init) =>
+        (init?.method ?? "GET") === "GET"
+          ? new Response(JSON.stringify({ success: false, errors: [{ code: 1, message: "nope" }], result: null }),
+              { status: 500, headers: { "content-type": "application/json" } })
+          : cfOk("should-not-happen"),
+      ),
+    );
+    const record: DnsRecord = { type: "A", host: "@", value: "1.2.3.4", ttl: 300 };
+    await expect(new CloudflareAdapter().apply("example.com", [record], AUTH)).rejects.toThrow();
   });
 
   it("requires zoneId + token", async () => {

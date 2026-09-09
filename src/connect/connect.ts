@@ -2,12 +2,12 @@
 // → plan → dispatch into one flow, and NEVER dead-ends (an unwritable path always
 // degrades to a polished manual fallback with the prepared records).
 //
-// Read-before-write (Fable P0-1): the SPF/DMARC merges and the MX clobber-guard run
+// Read-before-write: the SPF/DMARC merges and the MX clobber-guard run
 // against the zone's CURRENT records, read AUTHORITATIVELY through the same adapter
 // that will write (CF-API read-back), never a stale public-DoH cache. When no
 // adapter can read (manual path), a DoH read is the best-effort fallback.
 //
-// Method scoping (Fable P0-3): a "cloudflare" detection is only WRITTEN via our CF
+// Method scoping: a "cloudflare" detection is only WRITTEN via our CF
 // token when the zone is confirmed present in OUR account; a user-owned CF zone
 // falls back to manual. Control proof (P0-4) is recorded for every write.
 

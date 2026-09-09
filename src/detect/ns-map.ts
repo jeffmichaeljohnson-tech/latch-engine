@@ -2,7 +2,7 @@
 //
 // Detection maps on the *authoritative NS suffix*, never on WHOIS/registrar
 // (a registrar is not the DNS host — a GoDaddy-registered domain can live on
-// Cloudflare NS). See ARCHITECTURE.md §Detection.
+// Cloudflare NS).
 //
 // Each entry declares WHO the DNS host is (id + displayName) and the best
 // automated write path we have for it (`treatment`):

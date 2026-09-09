@@ -6,7 +6,7 @@
 // substitutes declarative placeholders as plain text and POSTs (or PUT/PATCH upserts)
 // via global fetch.
 //
-// Safety posture (Fable P0-5 — runtime codegen of a DNS-writing adapter with real
+// Safety posture (runtime codegen of a DNS-writing adapter with real
 // creds is the highest blast-radius surface, so it is disallowed):
 //  - manifest is DATA, interpreted; no expressions, no code.
 //  - upsert/create only — the interpreter has no branch that emits a DELETE, and

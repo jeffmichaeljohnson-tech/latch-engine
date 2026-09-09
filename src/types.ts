@@ -49,7 +49,7 @@ export interface DnsRecord {
 
 /**
  * Dynamic variables the engine substitutes into record `value`/`host` before write.
- * Uppercase + case-sensitive, matching the Entri-parity SDK contract.
+ * Uppercase + case-sensitive, matching the industry-standard SDK contract.
  * `emailProviderSPF` resolves to the detected sending provider's include token.
  */
 export interface RecordVars {

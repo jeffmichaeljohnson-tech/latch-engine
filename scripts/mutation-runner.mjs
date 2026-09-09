@@ -13,7 +13,14 @@
 //   KILLED       the suite ran and failed        -> the mutation is caught
 //   SURVIVED     the suite ran and passed        -> nothing pins this behaviour
 //   INCONCLUSIVE non-zero, but no tests ran      -> proves nothing either way
-//   NOT-APPLIED  the pattern was absent or ambiguous
+//   NOT-APPLIED  the pattern was absent, ambiguous, or changed nothing
+//
+// KNOWN LIMIT, stated rather than hidden: SURVIVED means either "no test pins
+// this behaviour" or "there was no behaviour to pin" — a whitespace or comment
+// edit survives and is reported the same as a real hole. Only a textually
+// identical replacement is caught. Telling those apart needs a parse, not a
+// substring, and a half-working detector here would be worse than a documented
+// limit: it is the same argument this file makes for INCONCLUSIVE.
 //
 // Exit 0 only when every mutation is KILLED. SURVIVED, INCONCLUSIVE and
 // NOT-APPLIED are all non-zero: a mutation that could not be applied is not a
@@ -22,6 +29,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 // The mutation currently written to disk, so a caught signal can undo it.
@@ -35,6 +43,10 @@ const sha = (s) => createHash('sha256').update(s).digest('hex');
 export function runOne(root, spec, exec) {
   const file = path.join(root, spec.file);
   const before = readFileSync(file, 'utf8');
+  if (spec.find === spec.replace) {
+    return { ...spec, verdict: NOT_APPLIED,
+      note: 'find and replace are identical — this mutation changes nothing' };
+  }
   const occurrences = before.split(spec.find).length - 1;
   if (occurrences !== 1) {
     return { ...spec, verdict: NOT_APPLIED,
@@ -59,7 +71,19 @@ export function runOne(root, spec, exec) {
       throw new Error(`FAILED TO RESTORE ${spec.file} — tree is dirty, stop and fix by hand`);
     }
   }
-  const ran = new RegExp(spec.ran ?? '.').test(out);
+  // A MISSING marker is refused, not defaulted.
+  //
+  // This used to be `spec.ran ?? '.'`, and `new RegExp('.')` matches any
+  // non-empty output — so omitting the field turned every non-zero exit back
+  // into KILLED, including a syntax error under which no test ran. The whole
+  // INCONCLUSIVE mechanism was opt-out by omission, which is the weakest
+  // possible form of a guarantee this file's own header calls its purpose.
+  if (!spec.ran) {
+    throw new Error(`mutation "${spec.name}" has no \`ran\` marker, and neither does the spec. `
+      + 'Without it a build failure cannot be told from a caught mutation. '
+      + 'Declare a pattern the test runner prints only when tests actually execute.');
+  }
+  const ran = new RegExp(spec.ran).test(out);
   if (code === 0) return { ...spec, verdict: ran ? SURVIVED : INCONCLUSIVE,
     note: ran ? 'suite passed with the mutation in place' : 'exit 0 but no evidence tests ran' };
   return { ...spec, verdict: ran ? KILLED : INCONCLUSIVE,
@@ -105,7 +129,12 @@ export function report(results) {
   return lines.join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `pathToFileURL`, not string concatenation. `import.meta.url` percent-encodes;
+// `process.argv[1]` does not, so on any path containing a space -- or any other
+// character a URL escapes -- the two never match, the CLI block never runs, and
+// the process exits 0 having printed nothing. A mutation step that silently
+// passes is the precise failure this file exists to detect.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const root = process.argv[2] ?? '.';
   const specPath = process.argv[3] ?? path.join(root, 'mutations.json');
   const { command, ran, mutations } = JSON.parse(readFileSync(specPath, 'utf8'));
@@ -146,7 +175,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     });
   }
 
-  const results = runAll(root, mutations.map((m) => ({ ...m, ran: m.ran ?? ran })), exec);
+  let results;
+  try {
+    results = runAll(root, mutations.map((m) => ({ ...m, ran: m.ran ?? ran })), exec);
+  } catch (e) {
+    // A spec problem is a spec problem, not a stack trace at a reader.
+    console.error(`spec: ${e.message}`);
+    process.exit(2);
+  }
   console.log(report(results));
   process.exit(results.every((r) => r.verdict === KILLED) ? 0 : 1);
 }

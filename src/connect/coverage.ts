@@ -20,7 +20,7 @@ export interface CoveragePolicy {
 }
 
 /**
- * v1 coverage (confirmed with JJ 2026-07-21): Cloudflare-owned + Route 53 fast-follow.
+ * v1 coverage: Cloudflare-owned zones, with Route 53 as the fast-follow.
  * Namecheap → manual fallback.
  *
  * domainConnect is OFF until GBuild authors + registers the "gbuild-email" Domain

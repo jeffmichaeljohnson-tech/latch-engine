@@ -31,7 +31,7 @@ export interface DomainConnectConfig {
   /** Provider sync UX base, e.g. "https://domainconnect.godaddy.com/sync". */
   urlSyncUX: string;
   /**
-   * Template variables (UPPERCASE, per the Entri/Domain-Connect SDK contract).
+   * Template variables (UPPERCASE, per the Domain Connect SDK contract).
    * The orchestrator derives these from the prepared records before building
    * the URL — they become query params on the apply URL.
    */

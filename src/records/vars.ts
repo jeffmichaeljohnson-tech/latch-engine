@@ -1,7 +1,7 @@
 // Latch — dynamic variable resolution + shared record utilities.
 //
 // Records arrive as templates whose host/value may embed uppercase, case-sensitive
-// variables ({DOMAIN}{SUBDOMAIN}{SLD}{TLD}{emailProviderSPF}) — the Entri-parity
+// variables ({DOMAIN}{SUBDOMAIN}{SLD}{TLD}{emailProviderSPF}) — the industry-standard
 // SDK contract. The engine resolves them here, once, before a record is written.
 // Pure: no network, no clock; the caller supplies every value.
 

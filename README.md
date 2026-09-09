@@ -22,7 +22,8 @@ npm install
 npx vitest run
 ```
 
-19 files, **212 tests**, **440 assertions**, all passing. Nothing is skipped and no assertion is vacuous.
+19 files, **215 tests**, **447 assertions**, all passing. The two numbers count
+different things: 215 `it()` blocks, and 447 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
 
 ## Mutation
 
@@ -33,7 +34,7 @@ code were wrong. So the mutations are committed, not described:
 npm run mutation
 ```
 
-`mutations.json` lists sixteen changes to real logic — DNS record type codes, the
+`mutations.json` lists nineteen changes to real logic — DNS record type codes, the
 SPF qualifier regex, DMARC tag ordering, TTL clamping, the MX duplicate-preference
 check, and every branch of the DNSSEC detector. The runner applies each one,
 runs the suite, restores the file and verifies the restore by hash.
@@ -62,8 +63,22 @@ answer, a DNSKEY answer — were exercised by a single test that fired two of th
 at once and never reached the DNSKEY fallback at all, so any one branch could be
 deleted with the suite still green. Each signal now has a test that isolates it.
 
-The two numbers count different things: 208 is the number of `it()` blocks, 436
-is the number of `expect()` calls inside them.
+## The writer created what the merge had just folded in
+
+A red-team pass found the one that matters. `mergeSpf` reads the SPF already at
+the apex, folds a new include into it and returns **one** record — and the
+Cloudflare adapter then POSTed that merged record **beside** the original it had
+merged from. Two `v=spf1` TXTs at the apex is an RFC 7208 permerror: all mail for
+the domain fails. The call returned `status: "applied"`.
+
+Route 53 had always UPSERTed and Namecheap unions its host list, so Cloudflare —
+the only provider enabled by default — was the one that got it wrong, in the
+module whose first six lines are about not breaking other people's mail.
+
+The writer now reads the zone once, keys it by (type, name), and PUTs a match or
+POSTs a miss. Three tests pin it: the update, the create, and a zone it could not
+read — because falling back to a blind create there is the same bug one level
+quieter. All three carry mutations.
 
 ## Status
 

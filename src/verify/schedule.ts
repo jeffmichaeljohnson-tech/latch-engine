@@ -4,7 +4,7 @@
 // since the first attempt), return how long to wait before the next attempt, or
 // null to give up (→ overall "failed").
 //
-// Shape (Entri-parity): tight at first because most writes land in seconds, then
+// Shape: tight at first because most writes land in seconds, then
 // exponential backoff so a slow/queued propagation costs almost nothing, capped
 // so we eventually give up rather than poll forever.
 //
