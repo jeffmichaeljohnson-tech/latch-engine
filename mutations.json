@@ -115,6 +115,18 @@
       "file": "src/providers/cloudflare.ts",
       "find": "      if (!res.ok || !json.success || !json.result) {\n        throw new LatchError(\"provider_rejected\", cfErrorText(json.errors));\n      }\n      for (const r of json.result) existingById.set",
       "replace": "      if (!res.ok || !json.success || !json.result) {\n        // fall through with an empty view\n      }\n      for (const r of json.result ?? []) existingById.set"
+    },
+    {
+      "name": "TXT expected-side decoder reverted to outer-quote stripping",
+      "file": "src/verify/verify.ts",
+      "find": "    const want = unquoteTxt(expected.value);",
+      "replace": "    const want = expected.value.trim().replace(/^\"([\\s\\S]*)\"$/, \"$1\");"
+    },
+    {
+      "name": "TXT comparison keeps only the FIRST character-string",
+      "file": "src/net/resolver.ts",
+      "find": "  return chunks.map((c) => c.slice(1, -1).replace(/\\\\(.)/g, \"$1\")).join(\"\");",
+      "replace": "  return chunks.slice(0, 1).map((c) => c.slice(1, -1).replace(/\\\\(.)/g, \"$1\")).join(\"\");"
     }
   ]
 }

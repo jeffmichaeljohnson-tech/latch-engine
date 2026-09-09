@@ -10,6 +10,7 @@ import type { DnsRecord, VerifyResult, RecordVerifyState } from "../types";
 import {
   DOH_ENDPOINTS,
   readTxt,
+  unquoteTxt,
   type Resolver,
   type DnsResponse,
   type DnsAnswer,
@@ -58,14 +59,13 @@ function normHost(s: string): string {
   return s.trim().replace(/\.$/, "").toLowerCase();
 }
 
-/** Strip a single layer of wrapping quotes, if present. */
-function stripWrappingQuotes(s: string): string {
-  const t = s.trim();
-  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
-    return t.slice(1, -1);
-  }
-  return t;
-}
+// The expected value and the resolver's answer are decoded by the SAME function,
+// deliberately. A record whose value exceeds 255 octets is written as several
+// quoted character-strings that DNS concatenates back into one logical value
+// (RFC 1035 3.3.14) -- every 2048-bit DKIM key is one. A decoder that strips only
+// the OUTER pair of quotes turns `"aaa" "bbb"` into `aaa" "bbb`, which can never
+// equal the `aaabbb` the resolver reports, so a correctly published key verifies
+// as absent forever. Two decoders is what allowed the two sides to disagree.
 
 // ---------------------------------------------------------------------------
 // Per-type value comparison
@@ -95,7 +95,7 @@ const RR_NUM: Record<DnsRecord["type"], number> = {
  */
 export function responseMatches(resp: DnsResponse, expected: DnsRecord): boolean {
   if (expected.type === "TXT") {
-    const want = stripWrappingQuotes(expected.value);
+    const want = unquoteTxt(expected.value);
     return readTxt(resp).some((v) => v === want);
   }
 
