@@ -44,6 +44,16 @@ for (const r of records) console.log(r.type, r.host, r.value);
 // TXT _dmarc.send  v=DMARC1; p=none
 ```
 
+**This package ships TypeScript source, not a build.** `exports` points at
+`src/index.ts`, so the snippet above runs under a TypeScript-aware runtime or
+bundler — `tsx`, `vitest`, Vite, esbuild, Bun, Deno — and **not** under plain
+`node`, which will report `ERR_MODULE_NOT_FOUND`. That is deliberate: the engine
+targets both Cloudflare Workers and Node, has zero runtime dependencies, and
+shipping source lets each host compile it the way it already compiles everything
+else, instead of shipping a build that suits neither. Verified as a consumer
+would see it: `npm install latch-engine && npx tsx example.ts` prints
+`{"id":"cloudflare","displayName":"Cloudflare","treatment":"cloudflare"}`.
+
 Applying `records` through a provider — the Cloudflare, Route 53, Namecheap or
 Domain Connect adapter — and verifying they resolved is the `providers` and
 `verify` half of the surface; `src/index.ts` is the full export barrel.
