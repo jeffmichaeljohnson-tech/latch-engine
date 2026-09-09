@@ -16,7 +16,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "mutation": "node scripts/mutation-runner.mjs . mutations.json",
+    "test:mutation-runner": "node scripts/mutation-runner.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

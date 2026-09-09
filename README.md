@@ -24,10 +24,37 @@ npx vitest run
 
 19 files, **212 tests**, **440 assertions**, all passing. Nothing is skipped and no assertion is vacuous.
 
-The suite is **mutation-tested**, which is a stronger claim than a pass count.
-Fifteen mutations were applied to real logic — DNS record type codes, the SPF
-qualifier regex, DMARC tag ordering, TTL clamping, the MX duplicate-preference
-check. Every one is caught.
+## Mutation
+
+A pass count says a suite runs. It does not say the suite would notice if the
+code were wrong. So the mutations are committed, not described:
+
+```
+npm run mutation
+```
+
+`mutations.json` lists sixteen changes to real logic — DNS record type codes, the
+SPF qualifier regex, DMARC tag ordering, TTL clamping, the MX duplicate-preference
+check, and every branch of the DNSSEC detector. The runner applies each one,
+runs the suite, restores the file and verifies the restore by hash.
+
+It reports four verdicts, and the third is why it exists:
+
+| verdict | meaning |
+|---|---|
+| `KILLED` | the suite ran and failed — the mutation is caught |
+| `SURVIVED` | the suite ran and passed — nothing pins this behaviour |
+| `INCONCLUSIVE` | non-zero exit, but no evidence any test ran |
+| `NOT-APPLIED` | the pattern was absent, or matched more than once |
+
+A mutation that stops the code compiling also exits non-zero. A runner reading
+only the exit code scores that as a kill it never earned, so a spec declares a
+marker the test runner prints only when tests actually execute, and a non-zero
+exit without it is `INCONCLUSIVE` — never counted as caught.
+
+The runner has its own suite (`npm run test:mutation-runner`), because a tool
+that measures test suites is a check, and a check nobody has watched fail is a
+claim. It was driven red by reintroducing the exit-code-only defect.
 
 Four of those mutations originally survived, all inside the DNSSEC detector. Its
 four positive signals — the NS query's AD flag, the DS query's AD flag, a DS

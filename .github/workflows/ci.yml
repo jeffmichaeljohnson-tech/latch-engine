@@ -17,3 +17,7 @@ jobs:
         run: npx tsc --noEmit
       - name: test
         run: npx vitest run
+      - name: the mutation runner's own suite
+        run: npm run test:mutation-runner
+      - name: mutation
+        run: npm run mutation
