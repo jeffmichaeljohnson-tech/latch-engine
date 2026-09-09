@@ -123,17 +123,44 @@ function toHostRow(record: DnsRecord, domain: string): HostRow {
   };
 }
 
-function keyOf(name: string, type: string): string {
-  return `${type.toUpperCase()}::${name.toLowerCase()}`;
+/**
+ * TXT is the one multi-valued type where several UNRELATED records legitimately
+ * share one owner name: an apex routinely carries SPF beside a Google, Microsoft
+ * or Atlassian site-verification token. Keying the union on (type, host) alone
+ * would make writing the SPF silently delete every one of them -- setHosts has no
+ * per-record id, so whatever is left out of the body is gone.
+ *
+ * So a TXT row also carries a SLOT, taken from its own value:
+ *   - a `v=<TAG>` prefix (spf1, DKIM1, DMARC1) is the slot, so a new SPF replaces
+ *     the old SPF -- and only the SPF. Leaving it out would append a second
+ *     v=spf1 at the apex, which is an RFC 7208 permerror and fails all mail.
+ *   - anything else is its own slot, keyed by the exact value. An unrelated
+ *     token is therefore never displaced, and rewriting the same value is
+ *     idempotent. The trade is that changing an arbitrary TXT to a new arbitrary
+ *     value ADDS rather than replaces; for a type whose records are additive by
+ *     nature, erring toward keeping a stranger's record is the safe direction.
+ *
+ * Existing rows arrive from Namecheap XML with no purpose field, so the slot has
+ * to be derived from the value -- it cannot be read off the record.
+ */
+function txtSlot(address: string): string {
+  const tag = /^\s*"?\s*v\s*=\s*([A-Za-z0-9]+)/i.exec(address);
+  return tag ? `v=${(tag[1] ?? "").toLowerCase()}` : address.trim();
+}
+
+function keyOf(name: string, type: string, address: string): string {
+  const base = `${type.toUpperCase()}::${name.toLowerCase()}`;
+  return type.toUpperCase() === "TXT" ? `${base}::${txtSlot(address)}` : base;
 }
 
 /**
- * Union: incoming records REPLACE existing rows with the same (type, host);
- * every unrelated existing row is preserved. Exported for direct unit testing.
+ * Union: an incoming record REPLACES the existing row occupying the same slot --
+ * (type, host) for every type, narrowed by the TXT slot above for TXT. Every
+ * other existing row is preserved. Exported for direct unit testing.
  */
 export function unionHosts(existing: HostRow[], incoming: HostRow[]): HostRow[] {
-  const incomingKeys = new Set(incoming.map((r) => keyOf(r.name, r.type)));
-  const kept = existing.filter((r) => !incomingKeys.has(keyOf(r.name, r.type)));
+  const incomingKeys = new Set(incoming.map((r) => keyOf(r.name, r.type, r.address)));
+  const kept = existing.filter((r) => !incomingKeys.has(keyOf(r.name, r.type, r.address)));
   return [...kept, ...incoming];
 }
 
