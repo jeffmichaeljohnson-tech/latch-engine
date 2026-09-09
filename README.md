@@ -22,9 +22,18 @@ npm install
 npx vitest run
 ```
 
-19 files, **208 tests**, **436 assertions**, all passing. Nothing is skipped and
-no assertion is vacuous, which is a property the suite is checked for rather than
-one that is asserted here.
+19 files, **212 tests**, **440 assertions**, all passing. Nothing is skipped and no assertion is vacuous.
+
+The suite is **mutation-tested**, which is a stronger claim than a pass count.
+Fifteen mutations were applied to real logic — DNS record type codes, the SPF
+qualifier regex, DMARC tag ordering, TTL clamping, the MX duplicate-preference
+check. Every one is caught.
+
+Four of those mutations originally survived, all inside the DNSSEC detector. Its
+four positive signals — the NS query's AD flag, the DS query's AD flag, a DS
+answer, a DNSKEY answer — were exercised by a single test that fired two of them
+at once and never reached the DNSKEY fallback at all, so any one branch could be
+deleted with the suite still green. Each signal now has a test that isolates it.
 
 The two numbers count different things: 208 is the number of `it()` blocks, 436
 is the number of `expect()` calls inside them.

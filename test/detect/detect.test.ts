@@ -56,6 +56,34 @@ function ds(name: string): [string, DnsResponse] {
   ];
 }
 
+// The four DNSSEC signals are deliberately separable. `ds()` above sets AD *and*
+// carries an answer, so it proves the detector as a whole but cannot distinguish
+// which branch fired — disabling either one alone left the suite green.
+function nsSigned(name: string, hosts: string[]): [string, DnsResponse] {
+  return [
+    `${name}|NS`,
+    { Status: 0, AD: true, Answer: hosts.map((h) => ({ name, type: RR.NS, TTL: 3600, data: h })) },
+  ];
+}
+
+function dsAnswerOnly(name: string): [string, DnsResponse] {
+  return [
+    `${name}|DS`,
+    { Status: 0, AD: false, Answer: [{ name, type: RR.DS, TTL: 3600, data: "12345 13 2 abc" }] },
+  ];
+}
+
+function dsAdOnly(name: string): [string, DnsResponse] {
+  return [`${name}|DS`, { Status: 0, AD: true, Answer: [] }];
+}
+
+function dnskey(name: string): [string, DnsResponse] {
+  return [
+    `${name}|DNSKEY`,
+    { Status: 0, AD: false, Answer: [{ name, type: RR.DNSKEY, TTL: 3600, data: "257 3 13 abc" }] },
+  ];
+}
+
 class FakeResolver implements Resolver {
   private readonly map: Map<string, DnsResponse>;
   readonly seen: string[] = [];
@@ -178,6 +206,39 @@ describe("detect() — provider detection", () => {
     const r = new FakeResolver([ns("plain.com", ["aida.ns.cloudflare.com."])]);
     const res = await detect("plain.com", r);
     expect(res.dnssec).toBe(false);
+  });
+
+  // Each signal on its own. Found by mutation: every branch of detectDnssec
+  // could be disabled individually with the suite staying green, because the
+  // one positive case above fires two of them at once and never reaches the
+  // DNSKEY fallback at all.
+  it("DNSSEC via the NS query's AD flag alone", async () => {
+    const r = new FakeResolver([nsSigned("ad.com", ["aida.ns.cloudflare.com."])]);
+    expect((await detect("ad.com", r)).dnssec).toBe(true);
+  });
+
+  it("DNSSEC via the DS query's AD flag alone, with no DS answer", async () => {
+    const r = new FakeResolver([
+      ns("dsad.com", ["aida.ns.cloudflare.com."]),
+      dsAdOnly("dsad.com"),
+    ]);
+    expect((await detect("dsad.com", r)).dnssec).toBe(true);
+  });
+
+  it("DNSSEC via a DS answer alone, with AD false", async () => {
+    const r = new FakeResolver([
+      ns("dsans.com", ["aida.ns.cloudflare.com."]),
+      dsAnswerOnly("dsans.com"),
+    ]);
+    expect((await detect("dsans.com", r)).dnssec).toBe(true);
+  });
+
+  it("DNSSEC via a DNSKEY answer alone, with no DS and no AD", async () => {
+    const r = new FakeResolver([
+      ns("dk.com", ["aida.ns.cloudflare.com."]),
+      dnskey("dk.com"),
+    ]);
+    expect((await detect("dk.com", r)).dnssec).toBe(true);
   });
 
   it("parked pattern → parked:true, method manual", async () => {
