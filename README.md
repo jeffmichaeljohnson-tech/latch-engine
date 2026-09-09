@@ -15,6 +15,39 @@ dependencies.
 - **connect** — turn a desired state into an ordered plan, and report coverage
 - **verify** — check propagation, and schedule re-checks
 
+## Use
+
+Identify who hosts a zone's DNS from its nameservers, then plan the records a
+send-only email identity needs — merge-safe against whatever is already at the
+zone. Both calls below are pure and synchronous: no network, no credentials.
+
+```ts
+import { matchNameservers, planEmailRecords } from "latch-engine";
+
+// Who hosts this zone's DNS? (matched on the authoritative NS suffix)
+const host = matchNameservers(["aida.ns.cloudflare.com", "rick.ns.cloudflare.com"]);
+// → { id: "cloudflare", displayName: "Cloudflare", treatment: "cloudflare" }
+
+// Plan the DNS a send-only identity needs, under a subdomain so the apex MX is
+// left intact. The second argument is the records already present at the zone.
+const { records, warnings } = planEmailRecords(
+  {
+    subdomain: "send",
+    spfIncludes: ["include:_spf.resend.com"],
+    dmarcTags: { p: "none" }, // monitor-only to start
+  },
+  [], // no existing records
+);
+
+for (const r of records) console.log(r.type, r.host, r.value);
+// TXT send         v=spf1 include:_spf.resend.com ~all
+// TXT _dmarc.send  v=DMARC1; p=none
+```
+
+Applying `records` through a provider — the Cloudflare, Route 53, Namecheap or
+Domain Connect adapter — and verifying they resolved is the `providers` and
+`verify` half of the surface; `src/index.ts` is the full export barrel.
+
 ## Test
 
 ```
@@ -22,8 +55,8 @@ npm install
 npx vitest run
 ```
 
-21 files, **229 tests**, **465 assertions**, all passing. The two numbers count
-different things: 229 `it()` blocks, and 465 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
+24 files, **248 tests**, **496 assertions**, all passing. The two numbers count
+different things: 248 `it()` blocks, and 496 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
 
 ## Mutation
 
@@ -34,12 +67,13 @@ code were wrong. So the mutations are committed, not described:
 npm run mutation
 ```
 
-`mutations.json` lists twenty-three changes to real logic — DNS record type codes,
+`mutations.json` lists thirty-three changes to real logic — DNS record type codes,
 the SPF qualifier regex, DMARC tag ordering, TTL clamping, the MX
 duplicate-preference check, every branch of the DNSSEC detector, both halves of
-the multi-string TXT decoder, and the Cloudflare and Namecheap write paths. The
-runner applies each one, runs the suite, restores the file and verifies the
-restore by hash.
+the multi-string TXT decoder, the DoH request's DNSSEC flag and its non-ok error
+path, the nameserver normaliser, the Route 53 SigV4 signer, and the Cloudflare
+and Namecheap write paths. The runner applies each one, runs the suite, restores
+the file and verifies the restore by hash.
 
 It reports four verdicts, and the third is why it exists:
 
