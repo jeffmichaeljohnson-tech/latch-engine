@@ -175,6 +175,30 @@
       "file": "src/providers/sigv4.ts",
       "find": "    headerMap.set(k.toLowerCase(), v.trim().replace(/\\s+/g, \" \"));",
       "replace": "    headerMap.set(k.toLowerCase(), v);"
+    },
+    {
+      "name": "resolver drops the DNSSEC do-flag (do=1 -> do=0)",
+      "file": "src/net/resolver.ts",
+      "find": "url.searchParams.set(\"do\", \"1\")",
+      "replace": "url.searchParams.set(\"do\", \"0\")"
+    },
+    {
+      "name": "resolver treats a non-ok HTTP status as success",
+      "file": "src/net/resolver.ts",
+      "find": "if (!res.ok) {",
+      "replace": "if (res.ok) {"
+    },
+    {
+      "name": "readTxt reads CNAME (15) answers instead of TXT (16)",
+      "file": "src/net/resolver.ts",
+      "find": ".filter((a) => a.type === 16)",
+      "replace": ".filter((a) => a.type === 15)"
+    },
+    {
+      "name": "normalizeNs stops stripping the trailing dot",
+      "file": "src/detect/ns-map.ts",
+      "find": ".replace(/\\.$/, \"\")",
+      "replace": ".replace(/\\.$/, \".\")"
     }
   ]
 }
