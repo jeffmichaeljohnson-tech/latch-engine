@@ -1,15 +1,33 @@
 {
   "name": "latch-engine",
   "version": "0.1.0",
-  "private": true,
   "license": "MIT",
   "type": "module",
   "description": "DNS automation: detect the provider from nameservers, plan the records a service needs, apply them through that provider's API, and verify they resolved. Portable across Cloudflare Workers and Node, zero runtime dependencies.",
+  "keywords": [
+    "dns",
+    "dns-automation",
+    "nameservers",
+    "cloudflare",
+    "route53",
+    "namecheap",
+    "domain-connect",
+    "spf",
+    "dkim",
+    "dmarc",
+    "dnssec",
+    "cloudflare-workers"
+  ],
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
