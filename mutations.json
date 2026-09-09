@@ -139,6 +139,42 @@
       "file": "src/providers/namecheap.ts",
       "find": "  return tag ? `v=${(tag[1] ?? \"\").toLowerCase()}` : address.trim();",
       "replace": "  return address.trim();"
+    },
+    {
+      "name": "SigV4 signing key skips the service step",
+      "file": "src/providers/sigv4.ts",
+      "find": "  const kSigning = await hmac(kService, \"aws4_request\");",
+      "replace": "  const kSigning = await hmac(kRegion, \"aws4_request\");"
+    },
+    {
+      "name": "SigV4 terminator string changed",
+      "file": "src/providers/sigv4.ts",
+      "find": "  const kSigning = await hmac(kService, \"aws4_request\");",
+      "replace": "  const kSigning = await hmac(kService, \"aws4-request\");"
+    },
+    {
+      "name": "SigV4 algorithm label changed",
+      "file": "src/providers/sigv4.ts",
+      "find": "const ALGORITHM = \"AWS4-HMAC-SHA256\";",
+      "replace": "const ALGORITHM = \"AWS4-HMAC-SHA512\";"
+    },
+    {
+      "name": "SigV4 canonical headers are no longer sorted",
+      "file": "src/providers/sigv4.ts",
+      "find": "  const sortedHeaderNames = [...headerMap.keys()].sort();",
+      "replace": "  const sortedHeaderNames = [...headerMap.keys()];"
+    },
+    {
+      "name": "SigV4 date stamp takes 10 characters instead of 8",
+      "file": "src/providers/sigv4.ts",
+      "find": "  const dateStamp = amzDate.slice(0, 8);",
+      "replace": "  const dateStamp = amzDate.slice(0, 10);"
+    },
+    {
+      "name": "SigV4 header values are no longer whitespace-normalised",
+      "file": "src/providers/sigv4.ts",
+      "find": "    headerMap.set(k.toLowerCase(), v.trim().replace(/\\s+/g, \" \"));",
+      "replace": "    headerMap.set(k.toLowerCase(), v);"
     }
   ]
 }

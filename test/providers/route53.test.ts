@@ -82,6 +82,38 @@ describe("SigV4 known-answer (AWS aws-sig-v4-test-suite: get-vanilla)", () => {
         "Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31",
     );
   });
+
+  // SigV4 requires a header value to be trimmed and its internal whitespace
+  // collapsed before it is signed (the aws-sig-v4-test-suite calls this
+  // get-header-value-trim). get-vanilla cannot reach the rule -- its values
+  // carry no extra whitespace -- so a mutation removing the normalisation
+  // SURVIVED the known-answer vector. Asserted here as an equivalence rather
+  // than a second published signature: the padded form and the collapsed form
+  // must sign identically, which is exactly what the rule says and needs no
+  // vector to state.
+  it("normalises header whitespace before signing, so padding cannot change the signature", async () => {
+    const sign = (value: string) =>
+      signRequest({
+        method: "GET",
+        url: "https://example.amazonaws.com/",
+        region: "us-east-1",
+        service: "service",
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        headers: { "x-amz-date": "20150830T123600Z", "my-header1": value },
+        amzDate: "20150830T123600Z",
+        body: "",
+      });
+
+    const padded = await sign("  value1   value2     value3  ");
+    const collapsed = await sign("value1 value2 value3");
+    expect(padded.signature).toBe(collapsed.signature);
+
+    // The control: a genuinely DIFFERENT value must still sign differently, so
+    // the equality above cannot be satisfied by a signer that ignores headers.
+    const other = await sign("value1 value2 value4");
+    expect(other.signature).not.toBe(collapsed.signature);
+  });
 });
 
 describe("Route53Adapter.apply", () => {
