@@ -1,20 +1,29 @@
 name: Mutation score
 
-# A curated mutation set -- the one `npm run mutation` applies -- lists changes a
-# person thought of, and a suite that catches all of them has proved only that the
-# author's imagination and the author's tests agree. They always do. This job runs
-# a GENERATOR instead: Stryker builds its own mutants from the syntax tree, which
-# is how you find the defect nobody thought to write down.
+# `mutations.json` is a CURATED set -- changes a person thought of -- and the
+# suite catches all of them. That measures the author's imagination against the
+# author's tests, and those always agree. This job runs a GENERATOR instead:
+# Stryker builds its own mutants from the syntax tree, which is how the case
+# nobody wrote down gets found.
 #
-# It is not on the pull-request path. It takes minutes rather than seconds, and a
-# score is a trend rather than a verdict on one patch. `break` is set to the score
-# at the time this job was added, so the number cannot quietly fall; raising it
-# after an improvement is a deliberate commit, which is the point.
+# Off the pull-request path: minutes rather than seconds, and a score is a trend
+# rather than a verdict on one patch.
 #
-# Stryker is installed here rather than carried as a devDependency, so a normal
-# `npm ci` stays small. It is pinned to a MAJOR on purpose: Stryker 10 resolves a
-# Babel that cannot parse this TypeScript, which was measured, not guessed. Bump
-# it deliberately and re-check the score in the same commit.
+# WHY THE COMMAND RUNNER, NOT THE VITEST RUNNER
+#
+# Stryker's vitest integration declares `vitest: ">=2.0.0"` and installs happily
+# against vitest 5 -- then reports whole files at 0.00% with every mutant
+# "surviving" while the entire suite passes. Measured on one commit with only the
+# vitest version changed: 93.94% on vitest 2, 16.84% on vitest 5. Proven on a
+# single mutant by hand -- Stryker called it SURVIVED, and applying that exact
+# mutation to the source fails 37 tests. The tests catch it; the harness was not
+# running them.
+#
+# The command runner shells out to `npx vitest run` per mutant, so it cannot be
+# fooled by a broken integration. It is slower -- no per-test coverage, so every
+# mutant runs the whole suite -- and that is the right trade for a weekly job
+# whose output is a published number. Same mechanism the sibling repositories
+# already use.
 on:
   schedule:
     - cron: '31 5 * * 1'
@@ -34,9 +43,34 @@ jobs:
           cache: npm
       - run: npm ci
       - name: install the mutant generator
-        run: npm i -D --no-save "@stryker-mutator/core@^9" "@stryker-mutator/vitest-runner@^9"
+        run: npm i -D --no-save "@stryker-mutator/core@^9"
       - name: mutation score
-        run: npx stryker run
+        run: |
+          cat > stryker.conf.json <<'JSON'
+          {
+            "packageManager": "npm",
+            "testRunner": "command",
+            "commandRunner": { "command": "npx vitest run" },
+            "mutate": ["src/**/*.ts", "!src/**/*.test.ts"],
+            "reporters": ["clear-text", "json"],
+            "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
+            "concurrency": 4,
+            "coverageAnalysis": "off",
+            "timeoutMS": 180000
+          }
+          JSON
+          npx stryker run
+      # A measurement tool can fail in two ways: it can crash, which is loud and
+      # harmless, or it can return a number, which is neither. This step refuses
+      # the second. The curated set is the second witness -- it invokes the test
+      # command as a subprocess and cannot be fooled by a runner integration --
+      # so if the generated report says a curated file killed NOTHING, the two
+      # disagree and the curated one is the one that ran the tests.
+      #
+      # Exit 1 means the harness is suspect and the score must not be published.
+      # Exit 2 means the two could not be compared, which is UNKNOWN, not OK.
+      - name: refuse a score the harness did not earn
+        run: node scripts/check-mutation-harness.mjs reports/mutation/mutation.json mutations.json
       - name: keep the HTML report
         if: always()
         uses: actions/upload-artifact@v4
