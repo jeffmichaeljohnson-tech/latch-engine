@@ -1,548 +1,705 @@
-// Mutation-directed tests for src/connect/plan.ts.
+// Latch — connect/plan.ts: mutation-hardening tests.
 //
-// Companion to plan.test.ts: that suite proves the happy-path behaviour reads
-// well; this one pins the edges a mutant slips through — host canonicalization,
-// subdomain/owner normalization, the merge/clobber guards, purpose
-// classification, and the ttl/tag spreads. Each test names the defect it
-// prevents. Negative controls are paired with every positive so a test cannot
-// pass against a function that always returns the "yes" answer.
+// Companion to plan.test.ts. That suite proves the happy paths read well
+// (subdomain default, SPF merge, MX clobber-guard, DKIM placement, site records);
+// this one pins the edges a mutant slips through. The whole point of a plan is to
+// say TRUTHFULLY what WILL change before anything changes, so the strongest
+// assertions here aim at the two failures that matter most: a plan reporting an
+// operation as applied when it was not (a spurious record, a warning that should
+// not fire, a host written to the wrong owner) and a plan omitting an operation
+// that will happen (a merge skipped, a clobber-guard silenced, a record dropped).
+//
+// plan.ts is PURE — it never touches the network. To PROVE that (and to honor the
+// no-real-network rule), every test runs with global fetch stubbed to throw; a
+// stray call would surface as a failure.
+//
+// Each test names WHICH defect it prevents, and each group carries a negative
+// control so a function that always returns the "yes" answer cannot pass.
+//
+// EQUIVALENT MUTANTS (deliberately given no test — no observable behavior change):
+//   - L36 canonHost `.toLowerCase()` -> `.toUpperCase()`: canonHost is used ONLY
+//     inside symmetric equality (both operands are canonicalized), so folding to
+//     upper vs lower yields identical equality outcomes.
+//   - L47 ownerFor StringLiteral `leaf === ""` -> "Stryker was here!": `leaf` is
+//     never "" at any call site (always "@", "_dmarc", or "<sel>._domainkey"), so
+//     the mutated comparison never changes `base`.
+//   - L109 / L120 StringLiteral `ownerFor("@", sub)` -> `ownerFor("", sub)`:
+//     ownerFor maps BOTH "@" and "" to base "", so spfHost/mxHost are identical.
+//   - L187 Regex `/\s+/` -> `/\s/`: `value` is trimmed and the following
+//     `.filter(t => t !== "")` removes the extra empty tokens a single-space split
+//     would produce, so `additions` is identical.
+//   - L189 StringLiteral `t !== ""` -> `t !== "Stryker was here!"`: split(/\s+/) of a
+//     trimmed string never yields "", so the `t !== ""` guard removes nothing and
+//     mutating its literal changes nothing.
+//   - L145/146/147, L193, L204, L206, L234, L301 ConditionalExpression -> true: each
+//     spreads `{ key: undefined }` when the source is undefined; mergeSpf / mergeDmarc
+//     / buildMx / planApex all treat a present-but-undefined field exactly like an
+//     absent one (`clampTtl(undefined)`, `if (input.tags)`, `!== undefined` checks).
+//   - L234 OptionalChaining `mxRecs[0]?.ttl` -> `mxRecs[0].ttl`: mxByHost only ever
+//     holds non-empty arrays (a record is pushed before the map is set), so
+//     `mxRecs[0]` is always defined.
+//   - L300 ConditionalExpression -> true: passing `{ resolved: undefined }` vs
+//     omitting it is identical to planApex (`input.resolved?.a ?? []`).
+//   - L308 ConditionalExpression -> true and its false-branch "apex" StringLiteral:
+//     at line 308 `apex.strategy` is invariantly "unresolved" (the flatten path
+//     returns earlier and the alias path needs supportsApex, handled above), so the
+//     condition is always true and the "apex" literal is never emitted.
 
-import { describe, expect, it } from "vitest";
-import type { DnsRecord } from "../../src/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   planEmailRecords,
   planFromResolvedRecords,
   planSiteRecords,
 } from "../../src/connect/plan";
+import { LatchError } from "../../src/types";
+import type { DnsRecord } from "../../src/types";
 
 const byPurpose = (rs: DnsRecord[], p: string) => rs.filter((r) => r.purpose === p);
-const hasWarning = (ws: { code: string }[], code: string) => ws.some((w) => w.code === code);
+const first = (rs: DnsRecord[], p: string) => byPurpose(rs, p)[0]!;
+const hasWarn = (ws: { code: string }[], code: string) => ws.some((w) => w.code === code);
 
-// ---------------------------------------------------------------------------
-// canonHost (L36) — host equality must be trailing-dot- AND case-insensitive,
-// and must strip ONLY a trailing dot (not the first interior dot).
-// Exercised through the DMARC merge, whose existing record carries a trailing
-// dot and interior dots ("_dmarc.agent.").
-// ---------------------------------------------------------------------------
-
-describe("canonHost / host equality (L36)", () => {
-  it("matches an existing DMARC across a trailing dot so the operator's policy is preserved", () => {
-    // Prevents: canonHost returning host unchanged (no trim/replace/lowercase),
-    // replacing /\.$/ with /\./ (which would strip the interior dot and mis-match),
-    // and the empty-replacement literal becoming "Stryker was here!".
-    const existing: DnsRecord[] = [
-      { type: "TXT", host: "_dmarc.agent.", value: "v=DMARC1; p=reject; rua=mailto:x@y.com", ttl: 3600 },
-    ];
-    const { records, warnings } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: [] },
-      existing,
-    );
-    const dmarc = byPurpose(records, "dmarc")[0]!;
-    // Existing p=reject wins over the p=none default → proves the host matched.
-    expect(dmarc.value).toContain("p=reject");
-    expect(hasWarning(warnings, "existing_dmarc")).toBe(true);
-  });
-
-  it("negative control: a DMARC at a DIFFERENT host is not matched (defaults to p=none)", () => {
-    const existing: DnsRecord[] = [
-      { type: "TXT", host: "_dmarc.other.", value: "v=DMARC1; p=reject", ttl: 3600 },
-    ];
-    const { records, warnings } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: [] },
-      existing,
-    );
-    const dmarc = byPurpose(records, "dmarc")[0]!;
-    expect(dmarc.value).toContain("p=none");
-    expect(dmarc.value).not.toContain("p=reject");
-    expect(hasWarning(warnings, "existing_dmarc")).toBe(false);
-  });
+// PROOF OF PURITY: any accidental network call throws and fails the test.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => {
+      throw new Error("plan.ts must never call the network");
+    }),
+  );
 });
+afterEach(() => vi.unstubAllGlobals());
 
-// ---------------------------------------------------------------------------
-// normalizeSub (L41, L42) — "@"/""/leading+trailing dots collapse to a bare
-// lowercased label; "@" collapses to apex "".
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// normalizeSub — subdomain normalization (src L40-43), observed as the SPF host.
+// ===========================================================================
+describe("normalizeSub (via planEmailRecords host)", () => {
+  const spfHostFor = (subdomain?: string) =>
+    first(planEmailRecords({ subdomain, spfIncludes: [] }, []).records, "spf").host;
 
-describe("normalizeSub (L41, L42)", () => {
-  it("strips leading/trailing dots and lowercases, keeping interior dots", () => {
-    // Prevents: dropping trim/replace/toLowerCase (the `sub ?? ""` mutant), and
-    // the regex variants that strip too little (a single leading/trailing dot)
-    // or too much (interior dots). "..Ag.ent.." must normalize to "ag.ent".
-    const { records } = planEmailRecords(
-      { subdomain: "..Ag.ent..", spfIncludes: ["include:_spf.resend.com"] },
-      [],
-    );
-    expect(byPurpose(records, "spf")[0]!.host).toBe("ag.ent");
+  it("trims, strips leading/trailing dots, and lower-cases", () => {
+    // Prevents L41 MethodExpression (`sub ?? ""` — the whole .trim().replace().toLowerCase()
+    // dropped) and the `.replace(…, "")` StringLiteral -> "Stryker was here!".
+    expect(spfHostFor(".Agent.")).toBe("agent");
   });
 
-  it('"@" collapses to the apex, so DMARC lands at "_dmarc" not "_dmarc.@"', () => {
-    // Prevents: the s === "@" ternary always taking the else branch (returning
-    // "@"), and its "" then-branch becoming a non-empty literal. The SPF host
-    // stays "@" in both readings, so DMARC is the discriminating host.
+  it("keeps an interior dot (only leading/trailing dots are stripped)", () => {
+    // Prevents the `^` anchor being dropped from the first alternative and the `$`
+    // from the second (`/\.+|\.+$/g`, `/^\.+|\.+/g`) — either would strip the middle
+    // dot, collapsing "a.b" to "ab".
+    expect(spfHostFor("a.b")).toBe("a.b");
+  });
+
+  it("strips MORE THAN ONE leading dot", () => {
+    // Prevents the `+` in the first alternative being reduced to a single char
+    // (`/^\.|\.+$/g`), which would leave ".agent".
+    expect(spfHostFor("..agent")).toBe("agent");
+  });
+
+  it("strips MORE THAN ONE trailing dot", () => {
+    // Prevents the `+` in the second alternative being reduced to a single char
+    // (`/^\.+|\.$/g`), which would leave "agent.".
+    expect(spfHostFor("agent..")).toBe("agent");
+  });
+
+  it("an omitted subdomain resolves to the apex, not to a literal", () => {
+    // Prevents L41 `(sub ?? "")` -> `(sub ?? "Stryker was here!")`: an undefined
+    // subdomain must collapse to the apex "@", never to "stryker was here!".
+    const { records } = planEmailRecords({ spfIncludes: [] }, []);
+    expect(first(records, "spf").host).toBe("@");
+  });
+
+  it('"@" is treated as the apex for BOTH a "@"-leaf and a named leaf', () => {
+    // Prevents L42 `s === "@" ? "" : s`:
+    //   -> ConditionalExpression false (always returns s): the DMARC host becomes
+    //      "_dmarc.@" instead of "_dmarc".
+    //   -> StringLiteral "" -> "Stryker was here!": both hosts gain the literal.
     const { records } = planEmailRecords({ subdomain: "@", spfIncludes: [] }, []);
-    expect(byPurpose(records, "dmarc")[0]!.host).toBe("_dmarc");
-    expect(byPurpose(records, "spf")[0]!.host).toBe("@");
+    expect(first(records, "spf").host).toBe("@");
+    expect(first(records, "dmarc").host).toBe("_dmarc"); // NOT "_dmarc.@"
   });
 });
 
-// ---------------------------------------------------------------------------
-// ownerFor (L47, L48) — a leaf under a subdomain composes "<leaf>.<sub>";
-// leaf "@"/"" collapses to the sub itself.
-// ---------------------------------------------------------------------------
-
-describe("ownerFor (L47, L48)", () => {
-  it("hosts the SPF identity at the bare subdomain, not '@.agent' or a literal", () => {
-    // Prevents: the base ternary flipping (base = leaf instead of "") which would
-    // yield "@.agent", the "" then-branch becoming "Stryker was here!", and the
-    // `if (sub === "")` guard becoming always-true (which would force the apex
-    // branch and return "@" for a subdomain identity).
-    const { records } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
-      [],
-    );
-    expect(byPurpose(records, "spf")[0]!.host).toBe("agent");
+// ===========================================================================
+// ownerFor — owner-name assembly (src L46-50), observed via SPF + DMARC hosts.
+// ===========================================================================
+describe("ownerFor (via planEmailRecords hosts)", () => {
+  it("nests a named leaf under a subdomain and collapses the '@'-leaf to the bare sub", () => {
+    // Prevents L48 `if (sub === "")` -> true (which would force the apex branch and
+    // return "@"/base for a real subdomain) and L47 ConditionalExpression -> false
+    // (base = leaf, giving "@.agent" for the SPF host).
+    const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
+    expect(first(records, "spf").host).toBe("agent"); // "@"-leaf collapses to the sub
+    expect(first(records, "dmarc").host).toBe("_dmarc.agent"); // named leaf nests
   });
 
-  it("negative control: an apex identity hosts SPF at '@'", () => {
+  it("NEGATIVE CONTROL: at the apex the '@'-leaf is '@' and a named leaf stays bare", () => {
     const { records } = planEmailRecords({ subdomain: "", spfIncludes: [] }, []);
-    expect(byPurpose(records, "spf")[0]!.host).toBe("@");
+    expect(first(records, "spf").host).toBe("@");
+    expect(first(records, "dmarc").host).toBe("_dmarc");
   });
 });
 
-// ---------------------------------------------------------------------------
-// txtAt (L59) — only TXT records at the host feed the SPF merge.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// canonHost + typesAt — the DKIM CNAME-coexistence guard (src L34-37, L72-74).
+// typesAt is reached only through the DKIM branch; a conflict makes buildDkim throw.
+// ===========================================================================
+describe("canonHost + typesAt (via DKIM coexistence guard)", () => {
+  const dkimCname = {
+    subdomain: "agent",
+    spfIncludes: [] as string[],
+    dkim: [{ selector: "resend", recordType: "CNAME" as const, value: "cname.target." }],
+  };
 
-describe("txtAt (L59)", () => {
-  it("ignores a non-TXT record whose value merely looks like SPF", () => {
-    // Prevents: the type-filter becoming always-true, which would fold an A
-    // record's SPF-shaped value into the merge and warn existing_spf.
+  it("throws when a non-CNAME already occupies the selector label (case- and dot-insensitive)", () => {
+    // The existing record's host is upper-cased, trailing-dotted and multi-label, so
+    // this one throw prevents EVERY canonHost mutant: identity (`host`), Regex
+    // `/\.$/` -> `/\./` (would drop an interior dot instead of the trailing one), and
+    // the replace StringLiteral -> "Stryker was here!". It also prevents L72
+    // BlockStatement -> {} (typesAt returns undefined -> no guard), L74 EqualityOperator
+    // `!==`, and filter ConditionalExpression -> false (no match -> no guard).
     const existing: DnsRecord[] = [
-      { type: "A", host: "agent", value: "v=spf1 include:_spf.evil.com -all", ttl: 3600 },
+      { type: "A", host: "RESEND._domainkey.AGENT.", value: "1.2.3.4", ttl: 300 },
     ];
-    const { records, warnings } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
-      existing,
-    );
-    const spf = byPurpose(records, "spf")[0]!;
-    expect(spf.value).not.toContain("evil");
-    expect(spf.value).toContain("~all"); // novice-safe default, not the A record's -all
-    expect(hasWarning(warnings, "existing_spf")).toBe(false);
+    let err: unknown;
+    try {
+      planEmailRecords(dkimCname, existing);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(LatchError);
+    expect((err as LatchError).code).toBe("unsupported");
   });
 
-  it("negative control: a real TXT SPF at the host IS merged", () => {
+  it("does NOT throw when the conflicting record sits at a DIFFERENT label", () => {
+    // Prevents L74 filter ConditionalExpression -> true (all hosts matched) and
+    // MethodExpression -> `existing` (returns the record objects, so `some(o => o !==
+    // "CNAME")` is true for ANY existing record). Here the A record is at a different
+    // _domainkey label, so a correct typesAt returns [] and nothing throws.
     const existing: DnsRecord[] = [
-      { type: "TXT", host: "agent", value: "v=spf1 include:_spf.evil.com -all", ttl: 3600 },
+      { type: "A", host: "other._domainkey.agent", value: "1.2.3.4", ttl: 300 },
     ];
-    const { records, warnings } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
-      existing,
-    );
-    expect(byPurpose(records, "spf")[0]!.value).toContain("evil");
-    expect(hasWarning(warnings, "existing_spf")).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// mxTargetsAt (L65-L68) — only MX records at the host count, empty/"." targets
-// are dropped, targets are trailing-dot-stripped for the warning detail.
-// ---------------------------------------------------------------------------
-
-describe("mxTargetsAt (L65-L68)", () => {
-  it("names the incumbent MX target cleanly (trailing dot stripped) in the warning", () => {
-    // Prevents: the target-map dropping .trim()/.replace (leaving "com.." in the
-    // detail), replacing /\.$/ with /\./ (corrupting "aspmx" → "aspmxl"), and the
-    // empty-replacement literal turning into "Stryker was here!".
-    const existing: DnsRecord[] = [
-      { type: "MX", host: "@", value: "aspmx.l.google.com.", ttl: 3600, priority: 1 },
-    ];
-    const { warnings } = planEmailRecords(
-      { subdomain: "", spfIncludes: [], mx: [{ priority: 10, target: "mx.resend.com" }] },
-      existing,
-    );
-    const mxWarn = warnings.find((w) => w.code === "existing_mx")!;
-    expect(mxWarn).toBeDefined();
-    // Exactly one dot then " Confirm" — a kept trailing dot would read "com.. Confirm".
-    expect(mxWarn.detail).toContain("aspmx.l.google.com. Confirm");
-    expect(mxWarn.detail).not.toContain("Stryker");
-  });
-
-  it("excludes non-MX records and empty/'.' targets from the clobber check", () => {
-    // Prevents: the MX-type filter becoming always-true (a TXT would count as a
-    // live mail provider), and the trailing `v.length > 0 && v !== "."` filter
-    // being weakened so a null-MX "." (→ "") or ".." (→ ".") falsely trips the guard.
-    const existing: DnsRecord[] = [
-      { type: "TXT", host: "@", value: "v=spf1 include:_spf.google.com ~all", ttl: 3600 },
-      { type: "MX", host: "@", value: ".", ttl: 3600, priority: 0 },
-      { type: "MX", host: "@", value: "..", ttl: 3600, priority: 5 },
-    ];
-    const { warnings } = planEmailRecords(
-      { subdomain: "", spfIncludes: [], mx: [{ priority: 10, target: "mx.resend.com" }] },
-      existing,
-    );
-    expect(hasWarning(warnings, "existing_mx")).toBe(false);
-  });
-
-  it("negative control: a real incumbent MX at the apex DOES trip the guard", () => {
-    const existing: DnsRecord[] = [
-      { type: "MX", host: "@", value: "aspmx.l.google.com.", ttl: 3600, priority: 1 },
-    ];
-    const { warnings } = planEmailRecords(
-      { subdomain: "", spfIncludes: [], mx: [{ priority: 10, target: "mx.resend.com" }] },
-      existing,
-    );
-    expect(hasWarning(warnings, "existing_mx")).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// typesAt (L72, L74) — feeds the DKIM RFC-1034 CNAME-coexistence guard, scoped
-// to the DKIM selector host only.
-// ---------------------------------------------------------------------------
-
-describe("typesAt drives the DKIM coexistence guard (L72, L74)", () => {
-  it("refuses a DKIM CNAME where a TXT already exists at the selector label", () => {
-    // Prevents: an empty typesAt body (returns undefined → guard never fires),
-    // and the host filter collapsing so the label's real types are lost.
-    expect(() =>
-      planEmailRecords(
-        {
-          subdomain: "agent",
-          spfIncludes: [],
-          dkim: [{ selector: "resend", recordType: "CNAME", value: "resend._domainkey.resend.com." }],
-        },
-        [{ type: "TXT", host: "resend._domainkey.agent", value: "existing=1", ttl: 3600 }],
-      ),
-    ).toThrow();
-  });
-
-  it("refuses a DKIM TXT where a CNAME already exists at the selector label", () => {
-    // Prevents: the map callback returning undefined (types = [undefined] →
-    // includes("CNAME") is false → guard silently passes).
-    expect(() =>
-      planEmailRecords(
-        {
-          subdomain: "agent",
-          spfIncludes: [],
-          dkim: [{ selector: "google", recordType: "TXT", value: "v=DKIM1; k=rsa; p=MIIB" }],
-        },
-        [{ type: "CNAME", host: "google._domainkey.agent", value: "dkim.google.com.", ttl: 3600 }],
-      ),
-    ).toThrow();
-  });
-
-  it("allows a DKIM CNAME when the conflicting type sits at a DIFFERENT host", () => {
-    // Prevents: the host filter becoming always-true or inverted so unrelated
-    // records at other hosts are reported at the selector label and over-refuse.
-    const { records } = planEmailRecords(
-      {
-        subdomain: "agent",
-        spfIncludes: [],
-        dkim: [{ selector: "resend", recordType: "CNAME", value: "resend._domainkey.resend.com." }],
-      },
-      [{ type: "TXT", host: "@", value: "some=verification", ttl: 3600 }],
-    );
-    const dkim = byPurpose(records, "dkim")[0]!;
+    const { records } = planEmailRecords(dkimCname, existing);
+    const dkim = first(records, "dkim");
     expect(dkim.host).toBe("resend._domainkey.agent");
     expect(dkim.type).toBe("CNAME");
   });
-});
 
-// ---------------------------------------------------------------------------
-// planEmailRecords MX gate (L119) and DMARC tag/ttl spreads (L144-L147).
-// ---------------------------------------------------------------------------
-
-describe("planEmailRecords MX gate (L119)", () => {
-  it("writes no MX and does not throw for a send-only identity", () => {
-    // Prevents: the `plan.mx && plan.mx.length > 0` guard becoming always-true,
-    // which would call buildMx with undefined entries and throw.
-    const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
-    expect(byPurpose(records, "mx")).toHaveLength(0);
+  it("a DKIM CNAME COEXISTS with an existing CNAME at the same label (no throw)", () => {
+    // Prevents L74 map ArrowFunction -> `() => undefined`: the real types must reach
+    // buildDkim. With a mutated map, typesAt yields [undefined]; `some(t => t !==
+    // "CNAME")` is then true and this legal CNAME+CNAME case would wrongly throw.
+    const existing: DnsRecord[] = [
+      { type: "CNAME", host: "resend._domainkey.agent", value: "old.target.", ttl: 300 },
+    ];
+    expect(() => planEmailRecords(dkimCname, existing)).not.toThrow();
   });
 
-  it("does not warn existing_mx when the requested MX set is empty", () => {
-    // Prevents: the length comparison becoming `>= 0`, which would enter the MX
-    // branch for an empty set and fire the clobber warning though nothing is written.
+  it("a DKIM TXT is rejected when a CNAME already occupies the label", () => {
+    // Also prevents L74 map -> `() => undefined`: buildDkim's TXT path checks
+    // `existing.includes("CNAME")`, which needs the literal "CNAME" type — [undefined]
+    // would not include it and the illegal coexistence would slip through.
     const existing: DnsRecord[] = [
-      { type: "MX", host: "@", value: "aspmx.l.google.com.", ttl: 3600, priority: 1 },
+      { type: "CNAME", host: "resend._domainkey.agent", value: "old.target.", ttl: 300 },
+    ];
+    const txtPlan = {
+      subdomain: "agent",
+      spfIncludes: [] as string[],
+      dkim: [{ selector: "resend", recordType: "TXT" as const, value: "v=DKIM1; p=abc" }],
+    };
+    expect(() => planEmailRecords(txtPlan, existing)).toThrow(LatchError);
+  });
+});
+
+// ===========================================================================
+// txtAt — selecting the existing SPF to merge into (src L57-59).
+// ===========================================================================
+describe("txtAt (existing-SPF selection)", () => {
+  it("ignores a v=spf1 TXT that lives at a DIFFERENT host", () => {
+    // Prevents L59 filter ConditionalExpression -> true (which would pull in TXTs
+    // from every host): an apex SPF must not be folded into a subdomain identity.
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "@", value: "v=spf1 include:_spf.foreign.com -all", ttl: 3600 },
+    ];
+    const { records, warnings } = planEmailRecords(
+      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
+      existing,
+    );
+    expect(first(records, "spf").value).not.toContain("_spf.foreign.com");
+    expect(hasWarn(warnings, "existing_spf")).toBe(false);
+  });
+
+  it("ignores a non-TXT record even at the identity host", () => {
+    // Prevents L59 dropping the `r.type === "TXT"` half: an MX that happens to carry
+    // an spf-shaped value must NOT be treated as an existing SPF record.
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "agent", value: "v=spf1 include:_spf.foreign.com ~all", ttl: 3600, priority: 1 },
+    ];
+    const { records, warnings } = planEmailRecords(
+      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
+      existing,
+    );
+    expect(first(records, "spf").value).not.toContain("_spf.foreign.com");
+    expect(hasWarn(warnings, "existing_spf")).toBe(false);
+  });
+
+  it("NEGATIVE CONTROL: a case-differing existing SPF at the identity host DOES merge", () => {
+    // Proves the filter is not "always false" AND exercises canonHost's case-fold on
+    // the SPF path: an upper-case existing host must still match the lower-case
+    // identity so the real SPF is merged (never a second v=spf1).
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "AGENT", value: "v=spf1 include:_spf.google.com ~all", ttl: 3600 },
+    ];
+    const { records, warnings } = planEmailRecords(
+      { subdomain: "agent", spfIncludes: ["include:_spf.resend.com"] },
+      existing,
+    );
+    expect(first(records, "spf").value).toBe(
+      "v=spf1 include:_spf.google.com include:_spf.resend.com ~all",
+    );
+    expect(hasWarn(warnings, "existing_spf")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// mxTargetsAt — the clobber-guard's incumbent-MX detection (src L63-68).
+// ===========================================================================
+describe("mxTargetsAt (via the MX clobber-guard)", () => {
+  const apexMxPlan = {
+    subdomain: "",
+    spfIncludes: [] as string[],
+    mx: [{ priority: 10, target: "mx.resend.com" }],
+  };
+
+  it("counts only real MX at the identity host", () => {
+    // Prevents L66 filter ConditionalExpression -> true and dropping the type/host
+    // filter: a foreign A record and an MX at another host must not read as an
+    // incumbent mail provider at the apex.
+    const existing: DnsRecord[] = [
+      { type: "A", host: "@", value: "1.2.3.4", ttl: 300 },
+      { type: "MX", host: "elsewhere", value: "mx.elsewhere.net.", ttl: 300, priority: 5 },
+    ];
+    expect(hasWarn(planEmailRecords(apexMxPlan, existing).warnings, "existing_mx")).toBe(false);
+  });
+
+  it("ignores null-MX and dot-only targets (they receive no mail)", () => {
+    // Prevents L65 dropping the final `.filter(v => v.length > 0 && v !== ".")`, L68
+    // EqualityOperator `length >= 0`, L68 LogicalOperator `||`, L68 StringLiteral
+    // `v !== "."` -> `v !== ""`, and L68 ConditionalExpression -> true. An RFC 7505
+    // null-MX ("." -> "" after the trailing-dot strip) and a ".." target ("." after
+    // the strip) are NOT live mail and must raise no clobber warning.
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "@", value: ".", ttl: 300, priority: 0 },
+      { type: "MX", host: "@", value: "..", ttl: 300, priority: 1 },
+    ];
+    expect(hasWarn(planEmailRecords(apexMxPlan, existing).warnings, "existing_mx")).toBe(false);
+  });
+
+  it("reports the incumbent targets with the trailing dot stripped", () => {
+    // Prevents L67 MethodExpression -> `r.value` (keeps the trailing dot), Regex
+    // `/\.$/` -> `/\./` (strips an interior dot), and StringLiteral "" -> "Stryker
+    // was here!". Two dotted targets force a ", " join, so the clean "mx1.test.net,"
+    // fragment appears only when the value was normalized correctly.
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "@", value: "mx1.test.net.", ttl: 300, priority: 1 },
+      { type: "MX", host: "@", value: "mx2.test.net.", ttl: 300, priority: 2 },
+    ];
+    const warn = planEmailRecords(apexMxPlan, existing).warnings.find((w) => w.code === "existing_mx")!;
+    expect(warn).toBeDefined();
+    expect(warn.detail).toContain("mx1.test.net,");
+    expect(warn.detail).toContain("mx2.test.net");
+  });
+
+  it("NEGATIVE CONTROL: a real incumbent MX at the apex DOES warn", () => {
+    // Proves the guard is not silently disabled by the cases above.
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "@", value: "aspmx.l.google.com.", ttl: 300, priority: 1 },
+    ];
+    expect(hasWarn(planEmailRecords(apexMxPlan, existing).warnings, "existing_mx")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// planEmailRecords — the MX-emission gate (src L119).
+// ===========================================================================
+describe("planEmailRecords MX gate", () => {
+  it("a send-only identity emits no MX and does not throw", () => {
+    // Prevents L119 ConditionalExpression -> true: forcing the guard true runs
+    // buildMx with `entries: undefined`, which throws on `for (const … of undefined)`.
+    let result: ReturnType<typeof planEmailRecords> | undefined;
+    expect(() => {
+      result = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
+    }).not.toThrow();
+    expect(byPurpose(result!.records, "mx")).toHaveLength(0);
+  });
+
+  it("an EMPTY mx array does not touch MX (no clobber warning against a live provider)", () => {
+    // Prevents L119 EqualityOperator `length > 0` -> `length >= 0`: with `>= 0`, an
+    // empty mx array (length 0) would still enter the MX branch and buildMx would
+    // raise existing_mx against the incumbent even though zero MX are being written.
+    const existing: DnsRecord[] = [
+      { type: "MX", host: "@", value: "aspmx.l.google.com.", ttl: 300, priority: 1 },
     ];
     const { records, warnings } = planEmailRecords(
       { subdomain: "", spfIncludes: [], mx: [] },
       existing,
     );
     expect(byPurpose(records, "mx")).toHaveLength(0);
-    expect(hasWarning(warnings, "existing_mx")).toBe(false);
+    expect(hasWarn(warnings, "existing_mx")).toBe(false);
+  });
+
+  it("NEGATIVE CONTROL: a non-empty mx array DOES emit MX", () => {
+    const { records } = planEmailRecords(
+      { subdomain: "agent", spfIncludes: [], mx: [{ priority: 10, target: "mx.resend.com" }] },
+      [],
+    );
+    expect(byPurpose(records, "mx").length).toBeGreaterThan(0);
   });
 });
 
-describe("planEmailRecords DMARC tags + ttl (L144-L147)", () => {
-  it("applies caller-supplied DMARC tags when there is no existing policy", () => {
-    // Prevents: the `plan.dmarcTags` spread being dropped (mergeDmarc would fall
-    // back to the p=none default).
+// ===========================================================================
+// planEmailRecords — the DMARC merge block (src L143-147).
+// ===========================================================================
+describe("planEmailRecords DMARC merge", () => {
+  it("applies caller-supplied DMARC tags to a fresh record", () => {
+    // Prevents L144 mergeDmarc argument -> {} (tags ignored) and the L146 tags-spread
+    // mutants (ObjectLiteral -> {}, ConditionalExpression -> false, EqualityOperator):
+    // a supplied p=quarantine must reach the record instead of the p=none default.
     const { records } = planEmailRecords(
       { subdomain: "agent", spfIncludes: [], dmarcTags: { p: "quarantine" } },
       [],
     );
-    const dmarc = byPurpose(records, "dmarc")[0]!;
-    expect(dmarc.value).toContain("p=quarantine");
-    expect(dmarc.value).not.toContain("p=none");
+    expect(first(records, "dmarc").value).toContain("p=quarantine");
   });
 
-  it("threads the caller ttl onto the SPF and DMARC records", () => {
-    // Prevents: the ttl spread being dropped (falls back to the 3600 clamp default).
-    const { records } = planEmailRecords(
-      { subdomain: "agent", spfIncludes: [], ttl: 1500 },
-      [],
-    );
-    expect(byPurpose(records, "spf")[0]!.ttl).toBe(1500);
-    expect(byPurpose(records, "dmarc")[0]!.ttl).toBe(1500);
-  });
-
-  it("negative control: default DMARC ttl is the 3600 clamp when no ttl is given", () => {
+  it("NEGATIVE CONTROL: without supplied tags the record defaults to p=none", () => {
     const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
-    expect(byPurpose(records, "dmarc")[0]!.ttl).toBe(3600);
+    expect(first(records, "dmarc").value).toContain("p=none");
+    expect(first(records, "dmarc").value).not.toContain("p=quarantine");
+  });
+
+  it("honors an explicit TTL on the DMARC record", () => {
+    // Prevents the L147 ttl-spread mutants (ConditionalExpression -> false,
+    // EqualityOperator): a supplied ttl of 900 must reach the record instead of the
+    // clampTtl default of 3600.
+    const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [], ttl: 900 }, []);
+    expect(first(records, "dmarc").ttl).toBe(900);
+  });
+
+  it("NEGATIVE CONTROL: an omitted TTL falls back to 3600", () => {
+    const { records } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, []);
+    expect(first(records, "dmarc").ttl).toBe(3600);
+  });
+
+  it("merges into an existing DMARC, preserving the operator's policy", () => {
+    // Prevents the L145 existingTxt-spread mutants (ObjectLiteral -> {},
+    // ConditionalExpression -> false, EqualityOperator) and L143 ArrowFunction ->
+    // `() => undefined`: an existing p=reject must be found, preserved, and warned.
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "_dmarc.agent", value: "v=DMARC1; p=reject", ttl: 3600 },
+    ];
+    const { records, warnings } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, existing);
+    expect(first(records, "dmarc").value).toContain("p=reject");
+    expect(hasWarn(warnings, "existing_dmarc")).toBe(true);
+  });
+
+  it("trims before matching the existing DMARC (leading whitespace still merges)", () => {
+    // Prevents L143 MethodExpression `t.trim()` -> `t`: a leading-space DMARC value
+    // would fail the `^v=DMARC1` anchor and be missed, silently dropping the merge.
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "_dmarc.agent", value: "  v=DMARC1; p=reject", ttl: 3600 },
+    ];
+    const { records, warnings } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, existing);
+    expect(first(records, "dmarc").value).toContain("p=reject");
+    expect(hasWarn(warnings, "existing_dmarc")).toBe(true);
+  });
+
+  it("does NOT treat a TXT that merely CONTAINS v=DMARC1 as the existing policy", () => {
+    // Prevents L143 Regex `/^v=DMARC1/i` -> `/v=DMARC1/i`: only a value that BEGINS
+    // with v=DMARC1 is the policy. A mid-string match must not preserve a stray
+    // p=reject or raise the merge warning.
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "_dmarc.agent", value: "note v=DMARC1; p=reject", ttl: 3600 },
+    ];
+    const { records, warnings } = planEmailRecords({ subdomain: "agent", spfIncludes: [] }, existing);
+    expect(first(records, "dmarc").value).toContain("p=none");
+    expect(first(records, "dmarc").value).not.toContain("p=reject");
+    expect(hasWarn(warnings, "existing_dmarc")).toBe(false);
   });
 });
 
-// ---------------------------------------------------------------------------
-// planFromResolvedRecords — classification of a caller-supplied resolved set.
-// ---------------------------------------------------------------------------
-
-describe("planFromResolvedRecords: SPF folding (L182, L184, L189, L193)", () => {
-  it("trims and classifies an SPF value carrying surrounding whitespace", () => {
-    // Prevents: dropping the .trim() so a leading-space "v=spf1 …" fails the
-    // regex and is mis-routed to passthrough.
+// ===========================================================================
+// planFromResolvedRecords — SPF folding of a caller's resolved set (src L182-193).
+// ===========================================================================
+describe("planFromResolvedRecords — SPF handling", () => {
+  it("recognizes an SPF value with leading whitespace", () => {
+    // Prevents L182 `rec.value.trim()` -> `rec.value`: an untrimmed value fails the
+    // ^v=spf1 anchor and would be passed through as a plain TXT instead of merged.
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "send", value: "  v=spf1 include:amazonses.com ~all  ", ttl: 3600 }],
-      [],
-    );
-    const spf = byPurpose(records, "spf");
-    expect(spf).toHaveLength(1);
-    expect(spf[0]!.value).toContain("include:amazonses.com");
-  });
-
-  it("classifies a bare 'v=spf1' (no mechanisms) as SPF", () => {
-    // Prevents: the regex losing its `|$` alternative, which would only match
-    // "v=spf1" followed by whitespace.
-    const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "send", value: "v=spf1", ttl: 3600 }],
+      [{ type: "TXT", host: "send", value: "  v=spf1 include:amazonses.com ~all", ttl: 3600 }],
       [],
     );
     expect(byPurpose(records, "spf")).toHaveLength(1);
   });
 
-  it("drops the caller's 'all' term instead of adopting a hard -all on a fresh record", () => {
-    // Prevents: the additions filter that strips the `all` mechanism being
-    // weakened, which would carry a caller's -all into a brand-new record instead
-    // of the novice-safe ~all default.
+  it("only recognizes SPF at the START of the value", () => {
+    // Prevents L184 Regex `/^v=spf1(\s|$)/i` -> `/v=spf1(\s|$)/i`: a value that merely
+    // contains v=spf1 mid-string is an unrelated TXT and must pass through verbatim.
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "send", value: "v=spf1 include:amazonses.com -all", ttl: 3600 }],
+      [{ type: "TXT", host: "send", value: "verify=x v=spf1 include:x ~all", ttl: 3600 }],
       [],
     );
-    expect(byPurpose(records, "spf")[0]!.value).toBe("v=spf1 include:amazonses.com ~all");
+    expect(records[0]!.purpose).not.toBe("spf");
+    expect(records[0]!.value).toBe("verify=x v=spf1 include:x ~all");
   });
 
-  it("threads the resolved SPF record's ttl through the merge", () => {
-    // Prevents: the rec.ttl spread being dropped (falls back to the 3600 clamp).
+  it("recognizes a bare 'v=spf1' (end-of-string anchor)", () => {
+    // Prevents L184 Regex `/^v=spf1(\s|$)/i` -> `/^v=spf1(\s)/i`: dropping the `$`
+    // alternative would fail to recognize a version-only SPF record.
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "send", value: "v=spf1 include:amazonses.com ~all", ttl: 700 }],
+      [{ type: "TXT", host: "send", value: "v=spf1", ttl: 3600 }],
       [],
     );
-    expect(byPurpose(records, "spf")[0]!.ttl).toBe(700);
+    expect(byPurpose(records, "spf")).toHaveLength(1);
+    expect(first(records, "spf").value).toBe("v=spf1 ~all");
   });
 
-  it("negative control: without ttl the merged SPF falls to the 3600 clamp", () => {
+  it("strips the caller's 'all' term and the v=spf1 prefix, defaulting to a soft ~all", () => {
+    // Prevents L186 MethodExpression -> `value.split(/\s+/).slice(1)` and ->
+    // `value.split(/\s+/)` (both drop the additions filter, propagating "-all"), the
+    // L189 ConditionalExpression -> true / LogicalOperator `||` (keep the all-term),
+    // and the L189 Regex `/^[^-~?+]?all$/i` (negated class no longer matches "-all").
+    // The caller's "-all" must NOT be adopted; a first write is novice-safe "~all".
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "send", value: "v=spf1 include:amazonses.com ~all" } as DnsRecord],
+      [{ type: "TXT", host: "send", value: "v=spf1 include:solo.example -all", ttl: 3600 }],
       [],
     );
-    expect(byPurpose(records, "spf")[0]!.ttl).toBe(3600);
+    expect(first(records, "spf").value).toBe("v=spf1 include:solo.example ~all");
+  });
+
+  it("the all-term regex is exact: mechanisms that only touch 'all' are kept, a bare 'all' is dropped", () => {
+    // Prevents L189 Regex `/^[-~?+]?all$/i` -> `/[-~?+]?all$/i` (drops ^, would remove
+    // "include:_spf.recall"), -> `/^[-~?+]?all/i` (drops $, would remove "allowme"),
+    // and -> `/^[-~?+]all$/i` (requires a qualifier, would KEEP the bare "all" and
+    // adopt it as the all-term). This is the case the "-all" test above cannot reach.
+    const { records } = planFromResolvedRecords(
+      [{ type: "TXT", host: "send", value: "v=spf1 include:_spf.recall allowme all", ttl: 3600 }],
+      [],
+    );
+    expect(first(records, "spf").value).toBe("v=spf1 include:_spf.recall allowme ~all");
+  });
+
+  it("carries the SPF record's TTL through the fold", () => {
+    // Prevents the L193 ttl-spread mutants (ObjectLiteral -> {}, ConditionalExpression
+    // -> false, EqualityOperator): a supplied ttl of 1200 must survive, not fall back
+    // to the 3600 default.
+    const { records } = planFromResolvedRecords(
+      [{ type: "TXT", host: "send", value: "v=spf1 include:x ~all", ttl: 1200 }],
+      [],
+    );
+    expect(first(records, "spf").ttl).toBe(1200);
   });
 });
 
-describe("planFromResolvedRecords: DMARC merge (L200-L206)", () => {
-  it("does NOT treat a plain verification TXT as a DMARC record", () => {
-    // Prevents: the `type === "TXT" && v=DMARC1` guard becoming an OR (every TXT
-    // would be rewritten into a p=none DMARC policy).
+// ===========================================================================
+// planFromResolvedRecords — DMARC classification + merge (src L200-206).
+// ===========================================================================
+describe("planFromResolvedRecords — DMARC handling", () => {
+  it("does NOT route a non-DMARC TXT into the DMARC branch", () => {
+    // Prevents L200 LogicalOperator `&&` -> `||` and ConditionalExpression -> true:
+    // a verification TXT must pass through verbatim, never be rewritten as a DMARC record.
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "label", value: "google-site-verification=abc123", ttl: 3600 }],
+      [{ type: "TXT", host: "send", value: "google-site-verification=abc123", ttl: 300 }],
       [],
     );
-    const rec = records[0]!;
-    expect(rec.value).toBe("google-site-verification=abc123");
-    expect(rec.purpose).not.toBe("dmarc");
+    expect(records[0]!.value).toBe("google-site-verification=abc123");
+    expect(records[0]!.purpose).not.toBe("dmarc");
   });
 
-  it("carries the resolved DMARC policy tags through when there is no existing record", () => {
-    // Prevents: mergeDmarc being called with {} (parsed tags dropped → p=none).
+  it("only matches DMARC at the START of the value", () => {
+    // Prevents L200 Regex `/^v=DMARC1/i` -> `/v=DMARC1/i`: a mid-string v=DMARC1 must
+    // not be treated as a DMARC policy.
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "_dmarc.send", value: "v=DMARC1; p=reject", ttl: 3600 }],
+      [{ type: "TXT", host: "send", value: "note v=DMARC1; p=reject", ttl: 300 }],
       [],
     );
-    expect(byPurpose(records, "dmarc")[0]!.value).toContain("p=reject");
+    expect(records[0]!.value).toBe("note v=DMARC1; p=reject");
+    expect(records[0]!.purpose).not.toBe("dmarc");
   });
 
-  it("preserves an existing DMARC policy over the resolved one", () => {
-    // Prevents: the existingTxt spread being dropped/inverted so the operator's
-    // policy is overwritten by the caller's.
+  it("merges the caller's DMARC into an existing policy, which wins (trim-tolerant)", () => {
+    // Prevents L201 MethodExpression `t.trim()` -> `t` (leading-space existing policy
+    // missed), the L204 existingTxt-spread mutants (ObjectLiteral -> {},
+    // ConditionalExpression -> false, EqualityOperator), and L201 ArrowFunction ->
+    // `() => undefined`. The operator's p=quarantine must be preserved and warned.
     const existing: DnsRecord[] = [
-      { type: "TXT", host: "_dmarc.send", value: "v=DMARC1; p=quarantine", ttl: 3600 },
+      { type: "TXT", host: "send", value: "  v=DMARC1; p=quarantine", ttl: 300 },
     ];
     const { records, warnings } = planFromResolvedRecords(
-      [{ type: "TXT", host: "_dmarc.send", value: "v=DMARC1; p=reject", ttl: 3600 }],
+      [{ type: "TXT", host: "send", value: "v=DMARC1; p=none;", ttl: 300 }],
       existing,
     );
-    const dmarc = byPurpose(records, "dmarc")[0]!;
-    expect(dmarc.value).toContain("p=quarantine");
-    expect(dmarc.value).not.toContain("p=reject");
-    expect(hasWarning(warnings, "existing_dmarc")).toBe(true);
+    expect(first(records, "dmarc").value).toContain("p=quarantine");
+    expect(hasWarn(warnings, "existing_dmarc")).toBe(true);
   });
 
-  it("threads the resolved DMARC record's ttl through the merge", () => {
-    // Prevents: the rec.ttl spread being dropped on the DMARC path.
+  it("does NOT match an existing DMARC that only CONTAINS v=DMARC1", () => {
+    // Prevents L201 Regex `/^v=DMARC1/i` -> `/v=DMARC1/i`: a stray p=reject that is not
+    // an anchored DMARC record must not be preserved or warned.
+    const existing: DnsRecord[] = [
+      { type: "TXT", host: "send", value: "pre v=DMARC1; p=reject", ttl: 300 },
+    ];
+    const { records, warnings } = planFromResolvedRecords(
+      [{ type: "TXT", host: "send", value: "v=DMARC1; p=none;", ttl: 300 }],
+      existing,
+    );
+    expect(first(records, "dmarc").value).toContain("p=none");
+    expect(first(records, "dmarc").value).not.toContain("p=reject");
+    expect(hasWarn(warnings, "existing_dmarc")).toBe(false);
+  });
+
+  it("carries the DMARC record's TTL through the merge", () => {
+    // Prevents the L206 ttl-spread mutants (ObjectLiteral -> {}, ConditionalExpression
+    // -> false, EqualityOperator).
     const { records } = planFromResolvedRecords(
-      [{ type: "TXT", host: "_dmarc.send", value: "v=DMARC1; p=none", ttl: 900 }],
+      [{ type: "TXT", host: "send", value: "v=DMARC1; p=none;", ttl: 1500 }],
       [],
     );
-    expect(byPurpose(records, "dmarc")[0]!.ttl).toBe(900);
+    expect(first(records, "dmarc").ttl).toBe(1500);
   });
 });
 
-describe("planFromResolvedRecords: MX priority + array init (L176, L177, L227, L234)", () => {
-  it("preserves an explicit MX priority instead of overwriting it with 10+i", () => {
-    // Prevents: `r.priority ?? 10 + i` becoming `r.priority && 10 + i`, which
-    // discards the supplied priority.
+// ===========================================================================
+// planFromResolvedRecords — MX grouping + priority/TTL fallback (src L227-234).
+// ===========================================================================
+describe("planFromResolvedRecords — MX grouping", () => {
+  it("preserves an explicitly-supplied MX priority", () => {
+    // Prevents L227 LogicalOperator `r.priority ?? 10 + i` -> `r.priority && 10 + i`:
+    // with `&&`, a real priority of 7 is truthy and would be REPLACED by 10.
     const { records } = planFromResolvedRecords(
-      [{ type: "MX", host: "send", value: "mx1.example.com", ttl: 3600, priority: 5 }],
+      [{ type: "MX", host: "send", value: "mx.example", ttl: 300, priority: 7 }],
       [],
     );
-    const mx = records.filter((r) => r.type === "MX");
-    expect(mx).toHaveLength(1);
-    expect(mx[0]!.priority).toBe(5);
+    expect(records.find((r) => r.type === "MX")!.priority).toBe(7);
   });
 
-  it("assigns ascending fallback priorities (10, 11) to MX entries missing one", () => {
-    // Prevents: the fallback arithmetic becoming 10 - i (yielding 10, 9).
-    const recs: DnsRecord[] = [
-      { type: "MX", host: "send", value: "mx1.example.com" } as DnsRecord,
-      { type: "MX", host: "send", value: "mx2.example.com" } as DnsRecord,
-    ];
-    const { records } = planFromResolvedRecords(recs, []);
-    const priorities = records.filter((r) => r.type === "MX").map((r) => r.priority).sort();
-    expect(priorities).toEqual([10, 11]);
-  });
-
-  it("threads the resolved MX ttl through buildMx", () => {
-    // Prevents: the mxRecs[0].ttl spread being dropped (falls back to 3600).
+  it("assigns ASCENDING unique fallback priorities to MX missing one", () => {
+    // Prevents L227 ArithmeticOperator `10 + i` -> `10 - i`: two priority-less MX must
+    // become 10 and 11, not 10 and 9.
     const { records } = planFromResolvedRecords(
-      [{ type: "MX", host: "send", value: "mx1.example.com", ttl: 800, priority: 10 }],
+      [
+        { type: "MX", host: "send", value: "mxa.example", ttl: 300 },
+        { type: "MX", host: "send", value: "mxb.example", ttl: 300 },
+      ],
       [],
     );
-    expect(records.find((r) => r.type === "MX")!.ttl).toBe(800);
+    expect(records.filter((r) => r.type === "MX").map((r) => r.priority)).toEqual([10, 11]);
   });
 
-  it("emits only real records — the output/warning arrays start empty", () => {
-    // Prevents: the `out`/`warnings` initializers seeded with a "Stryker was here"
-    // string element.
+  it("carries the first MX record's TTL onto the built set", () => {
+    // Prevents the L234 ttl-spread mutants (ObjectLiteral -> {}, ConditionalExpression
+    // -> false, EqualityOperator).
+    const { records } = planFromResolvedRecords(
+      [{ type: "MX", host: "send", value: "mx.example", ttl: 2400, priority: 10 }],
+      [],
+    );
+    expect(records.find((r) => r.type === "MX")!.ttl).toBe(2400);
+  });
+});
+
+// ===========================================================================
+// planFromResolvedRecords — passthrough + classifyPurpose (src L176-177, 221, 244-247).
+// ===========================================================================
+describe("planFromResolvedRecords — passthrough + classifyPurpose", () => {
+  it("classifies each passthrough record by host then type", () => {
+    // Prevents L245 ConditionalExpression -> true (everything -> "dkim"), the whole
+    // L246 A/AAAA/CNAME condition family (each equality, each string literal, each
+    // logical operator, and the true/false forcings), and L247 `return "other"` -> "".
+    const { records } = planFromResolvedRecords(
+      [
+        { type: "A", host: "@", value: "1.2.3.4", ttl: 300 },
+        { type: "AAAA", host: "@", value: "2606::1", ttl: 300 },
+        { type: "CNAME", host: "www", value: "site.example.", ttl: 300 },
+        { type: "CAA", host: "@", value: '0 issue "letsencrypt.org"', ttl: 300 },
+        { type: "NS", host: "deleg", value: "ns1.example.", ttl: 300 },
+        { type: "CNAME", host: "sel._domainkey.mail", value: "dk.example.", ttl: 300 },
+      ],
+      [],
+    );
+    const purposeOf = (value: string) => records.find((r) => r.value === value)!.purpose;
+    expect(purposeOf("1.2.3.4")).toBe("site"); // A -> site
+    expect(purposeOf("2606::1")).toBe("site"); // AAAA -> site
+    expect(purposeOf("site.example.")).toBe("site"); // CNAME (not _domainkey) -> site
+    expect(purposeOf('0 issue "letsencrypt.org"')).toBe("other"); // CAA -> other
+    expect(purposeOf("ns1.example.")).toBe("other"); // NS -> other
+    expect(purposeOf("dk.example.")).toBe("dkim"); // _domainkey CNAME -> dkim
+  });
+
+  it("NEGATIVE CONTROL: an explicit purpose on a passthrough record is respected", () => {
+    // classifyPurpose only applies when purpose is unset (`rec.purpose ?? …`).
+    const { records } = planFromResolvedRecords(
+      [{ type: "A", host: "www", value: "1.2.3.4", ttl: 300, purpose: "verification" }],
+      [],
+    );
+    expect(records[0]!.purpose).toBe("verification");
+  });
+
+  it("does not seed the output records or warnings with a bogus element", () => {
+    // Prevents L177 `const out: DnsRecord[] = []` -> ["Stryker was here"] and L176
+    // `const warnings: ConnectWarning[] = []` -> ["Stryker was here"]. A single
+    // passthrough CNAME with no existing DNS yields exactly one record and no warning.
     const { records, warnings } = planFromResolvedRecords(
-      [{ type: "A", host: "www", value: "1.2.3.4", ttl: 3600 }],
+      [{ type: "CNAME", host: "www", value: "site.example.", ttl: 300 }],
       [],
     );
     expect(records).toHaveLength(1);
-    expect(records[0]!.type).toBe("A");
-    expect(warnings).toHaveLength(0);
+    expect(records[0]).toMatchObject({ type: "CNAME", host: "www", purpose: "site" });
+    expect(warnings).toEqual([]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// classifyPurpose (L245-L247) — passthrough records get a best-effort purpose.
-// ---------------------------------------------------------------------------
-
-describe("planFromResolvedRecords: classifyPurpose (L245-L247)", () => {
-  const purposeOf = (rec: DnsRecord): string | undefined => {
-    const { records } = planFromResolvedRecords([rec], []);
-    return records[0]!.purpose;
-  };
-
-  it("tags a _domainkey CNAME as dkim", () => {
-    // Prevents: the _domainkey guard becoming always-false (would fall through to "site").
-    expect(purposeOf({ type: "CNAME", host: "sel._domainkey.send", value: "x.dkim.example.com", ttl: 3600 }))
-      .toBe("dkim");
-  });
-
-  it("tags a plain CNAME (no _domainkey) as site, not dkim", () => {
-    // Prevents: the _domainkey guard becoming always-true.
-    expect(purposeOf({ type: "CNAME", host: "cdn", value: "target.example.com", ttl: 3600 }))
-      .toBe("site");
-  });
-
-  it("tags A and AAAA records as site", () => {
-    // Prevents: the A/AAAA arms of the site test flipping to "" / inverted equality
-    // / && instead of ||.
-    expect(purposeOf({ type: "A", host: "www", value: "1.2.3.4", ttl: 3600 })).toBe("site");
-    expect(purposeOf({ type: "AAAA", host: "www", value: "::1", ttl: 3600 })).toBe("site");
-  });
-
-  it("tags a non-address, non-dkim record (CAA) as other", () => {
-    // Prevents: the "other" fallback literal becoming "", and the site test
-    // becoming always-true.
-    expect(purposeOf({ type: "CAA", host: "www", value: '0 issue "letsencrypt.org"', ttl: 3600 }))
-      .toBe("other");
-  });
-
-  it("respects an explicit purpose on a passthrough record", () => {
-    // Negative control: classification only applies when purpose is unset.
-    expect(purposeOf({ type: "A", host: "www", value: "1.2.3.4", ttl: 3600, purpose: "verification" }))
-      .toBe("verification");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// planSiteRecords (L280-L308) — subdomain CNAME, apex flatten/ALIAS, unresolved.
-// ---------------------------------------------------------------------------
-
-describe("planSiteRecords ttl + purpose + empty warnings (L280-L304)", () => {
-  it("uses the caller ttl on a subdomain CNAME and defaults to 3600 when unset", () => {
-    // Prevents: `ttl ?? 3600` becoming `ttl && 3600` (which would force 3600 for
-    // any explicit ttl and undefined when unset).
-    const withTtl = planSiteRecords(
-      { subdomain: "www", target: "pages.gbuild.app", supportsApex: false, ttl: 1800 },
-      [],
-    );
-    expect(withTtl.records[0]!.ttl).toBe(1800);
-    expect(withTtl.records[0]!.purpose).toBe("site"); // prevents the purpose literal → ""
-    expect(withTtl.warnings).toHaveLength(0); // prevents the [] initializer → ["Stryker was here"]
-
-    const noTtl = planSiteRecords(
-      { subdomain: "www", target: "pages.gbuild.app", supportsApex: false },
-      [],
-    );
-    expect(noTtl.records[0]!.ttl).toBe(3600);
-  });
-
-  it("apex on a flattening host emits a CNAME at @ with no warnings", () => {
-    // Prevents the apex-branch [] warnings initializer becoming non-empty.
+// ===========================================================================
+// planSiteRecords — subdomain, apex-flatten, apex A/AAAA, unresolved (src L273-309).
+// ===========================================================================
+describe("planSiteRecords", () => {
+  it("subdomain → a CNAME with the caller's TTL, purpose 'site', and no warnings", () => {
+    // Prevents L280 LogicalOperator `ttl ?? 3600` -> `ttl && 3600` (a real 900 becomes
+    // 3600), L280 StringLiteral `purpose: "site"` -> "", and L282 `warnings: []` ->
+    // ["Stryker was here"].
     const { records, warnings } = planSiteRecords(
-      { subdomain: "", target: "pages.gbuild.app", supportsApex: true, ttl: 2400 },
+      { subdomain: "www", target: "pages.gbuild.app", supportsApex: false, ttl: 900 },
       [],
     );
-    expect(records[0]).toMatchObject({ type: "CNAME", host: "@" });
-    expect(records[0]!.ttl).toBe(2400);
-    expect(warnings).toHaveLength(0);
+    expect(records[0]).toMatchObject({ type: "CNAME", host: "www", value: "pages.gbuild.app.", purpose: "site" });
+    expect(records[0]!.ttl).toBe(900);
+    expect(warnings).toEqual([]);
   });
 
-  it("apex flatten threads the caller ttl into the A/AAAA records", () => {
-    // Prevents: the ttl spread to planApex being dropped (would clamp to 300).
+  it("apex on a flattening host → a CNAME at @ with the caller's TTL and purpose 'site'", () => {
+    // Prevents L291 LogicalOperator `ttl ?? 3600` -> `ttl && 3600`, L291 StringLiteral
+    // `purpose: "site"` -> "", and L293 `warnings: []` -> ["Stryker was here"].
     const { records, warnings } = planSiteRecords(
-      { subdomain: "", target: "pages.gbuild.app", supportsApex: false, resolved: { a: ["1.2.3.4"] }, ttl: 1200 },
+      { subdomain: "", target: "pages.gbuild.app", supportsApex: true, ttl: 900 },
+      [],
+    );
+    expect(records[0]).toMatchObject({ type: "CNAME", host: "@", value: "pages.gbuild.app.", purpose: "site" });
+    expect(records[0]!.ttl).toBe(900);
+    expect(warnings).toEqual([]);
+  });
+
+  it("apex, non-flattening, with resolved IPs → A records at the caller's TTL, no warnings", () => {
+    // Prevents the L301 ttl-spread mutants (ObjectLiteral -> {}, ConditionalExpression
+    // -> false, EqualityOperator) and L304 `warnings: []` -> ["Stryker was here"].
+    const { records, warnings } = planSiteRecords(
+      { subdomain: "", target: "pages.gbuild.app", supportsApex: false, resolved: { a: ["1.2.3.4"] }, ttl: 900 },
       [],
     );
     expect(records[0]).toMatchObject({ type: "A", host: "@", value: "1.2.3.4" });
-    expect(records[0]!.ttl).toBe(1200);
-    expect(warnings).toHaveLength(0);
+    expect(records[0]!.ttl).toBe(900);
+    expect(warnings).toEqual([]);
   });
 
-  it("negative control: apex flatten with no ttl clamps to the 300 floor", () => {
+  it("NEGATIVE CONTROL: an omitted TTL flattens at planApex's 300 default", () => {
+    // Proves the TTL above is actually plumbed through, not a coincidence of 900.
     const { records } = planSiteRecords(
       { subdomain: "", target: "pages.gbuild.app", supportsApex: false, resolved: { a: ["1.2.3.4"] } },
       [],
@@ -550,16 +707,19 @@ describe("planSiteRecords ttl + purpose + empty warnings (L280-L304)", () => {
     expect(records[0]!.ttl).toBe(300);
   });
 
-  it("apex, non-flattening, unresolved → the warning detail carries the resolver reason", () => {
-    // Prevents: the `strategy === "unresolved" ? reason : "apex"` ternary flipping
-    // to the literal "apex", which would drop the actionable resolve-first message.
+  it("apex, non-flattening, unresolved → warns with planApex's reason, never a literal 'apex'", () => {
+    // Prevents L308 ConditionalExpression -> false, EqualityOperator `!==`, and the
+    // "unresolved" StringLiteral -> "" — each of which would emit the terse "apex"
+    // string instead of the actionable reason. The detail must tell the caller to
+    // resolve the target first.
     const { records, warnings } = planSiteRecords(
       { subdomain: "", target: "pages.gbuild.app", supportsApex: false },
       [],
     );
     expect(records).toHaveLength(0);
     const warn = warnings.find((w) => w.code === "apex_cname")!;
-    expect(warn.detail).toContain("Resolve the target");
+    expect(warn).toBeDefined();
+    expect(warn.detail).toContain("Resolve the target first");
     expect(warn.detail).not.toBe("apex");
   });
 });
