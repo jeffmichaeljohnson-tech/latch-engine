@@ -1,0 +1,46 @@
+name: Mutation score
+
+# A curated mutation set -- the one `npm run mutation` applies -- lists changes a
+# person thought of, and a suite that catches all of them has proved only that the
+# author's imagination and the author's tests agree. They always do. This job runs
+# a GENERATOR instead: Stryker builds its own mutants from the syntax tree, which
+# is how you find the defect nobody thought to write down.
+#
+# It is not on the pull-request path. It takes minutes rather than seconds, and a
+# score is a trend rather than a verdict on one patch. `break` is set to the score
+# at the time this job was added, so the number cannot quietly fall; raising it
+# after an improvement is a deliberate commit, which is the point.
+#
+# Stryker is installed here rather than carried as a devDependency, so a normal
+# `npm ci` stays small. It is pinned to a MAJOR on purpose: Stryker 10 resolves a
+# Babel that cannot parse this TypeScript, which was measured, not guessed. Bump
+# it deliberately and re-check the score in the same commit.
+on:
+  schedule:
+    - cron: '31 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stryker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: install the mutant generator
+        run: npm i -D --no-save "@stryker-mutator/core@^9" "@stryker-mutator/vitest-runner@^9"
+      - name: mutation score
+        run: npx stryker run
+      - name: keep the HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          if-no-files-found: ignore

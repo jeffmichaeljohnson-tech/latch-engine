@@ -22,6 +22,18 @@ jobs:
         run: npx tsc --noEmit
       - name: test
         run: npx vitest run
+      # The runner is UTC and most developers are not. A suite that passes only
+      # in the timezone it was written in is a suite that goes red for the first
+      # contributor in another one, and the cause is invisible from the failure.
+      # 25 hours of spread: +14, UTC, and -11. This is cheap -- the suite is
+      # under two seconds -- and it is the check that lets the security policy
+      # claim determinism without the claim rotting.
+      - name: the suite is timezone-independent
+        run: |
+          for tz in Pacific/Kiritimati Pacific/Niue; do
+            echo "--- TZ=$tz"
+            TZ=$tz npx vitest run
+          done
       - name: the mutation runner's own suite
         run: npm run test:mutation-runner
       - name: mutation
