@@ -65,8 +65,11 @@ npm install
 npx vitest run
 ```
 
-24 files, **248 tests**, **496 assertions**, all passing. The two numbers count
-different things: 248 `it()` blocks, and 496 `expect()` calls inside them. Nothing is skipped and no assertion is vacuous.
+46 files, **817 tests**, **1,171 `expect()` call sites**, all passing. The two
+numbers count different things and are not comparable: 817 is `it()` blocks,
+1,171 is `expect()` calls in the source. There are fewer call sites than tests
+because `it.each` runs one site many times — a fixture table of 37 nameservers is
+one `expect()` and 37 tests. Nothing is skipped and no assertion is vacuous.
 
 ## Mutation
 
@@ -108,6 +111,62 @@ four positive signals — the NS query's AD flag, the DS query's AD flag, a DS
 answer, a DNSKEY answer — were exercised by a single test that fired two of them
 at once and never reached the DNSKEY fallback at all, so any one branch could be
 deleted with the suite still green. Each signal now has a test that isolates it.
+
+### The curated set is not a mutation score
+
+Thirty-three of thirty-three is a perfect result against a list I wrote, which
+proves that my imagination and my tests agree. They always do. The number below
+is the one a reviewer gets:
+
+```
+npm i -D @stryker-mutator/core@^9 @stryker-mutator/vitest-runner@^9
+npx stryker run
+```
+
+**3,135 generated mutants, 2,967 caught — 94.93%.** Stryker builds its own
+mutants from the syntax tree rather than from a list, which is how the case
+nobody thought to write down gets found.
+
+| area | score |
+|---|---|
+| `detect/` | 96.46% — `ns-map.ts` at 100% |
+| `verify/` | 97.32% — `status.ts` and `schedule.ts` at 100% |
+| `net/` | 97.87% |
+| `providers/` | 94.85% — `domain-connect.ts` and `registry.ts` at 100% |
+| `records/` | 94.02% — `mx.ts` at 100% |
+| `connect/` | 93.39% |
+
+The first run of this scored **59.17%**, with 305 mutants in code no test
+executed at all. Two examples of what that hid, both closed:
+
+`ns-map.ts` — the provider table — scored **30.20%**. It was only ever reached
+incidentally, by tests that happened to use two or three hostnames, so a mutant
+could drop the `$` from the Route 53 pattern or delete Porkbun's second suffix
+and every test stayed green. Eleven of its twenty-four entries had no fixture at
+all. It is now 202 of 202.
+
+The SPF all-term regex `/^[-~?+]?all$/i` had a purpose-written mutation test, and
+three separate mutations of it still survived — dropping the `^`, dropping the
+`$`, and making the qualifier required. All three survived for one reason: the
+only fixture was `v=spf1 include:amazonses.com -all`, which none of them changes
+the answer for. `include:_spf.recall allowme all` separates them. That took a
+*second* pass over a file that already had a mutation test, which is the honest
+argument for running a generator rather than trusting a list.
+
+The lowest file is `sigv4.ts` at 86.49%, and it is named here rather than
+averaged away. Its remaining survivors need values that can only be pinned from
+this implementation, and the tests stop where the published AWS conformance
+vector stops — a pin makes a change deliberate but cannot discover a bug, so the
+line is drawn at what an external oracle can reach.
+
+Around 60 mutants across the package are recorded in the test files as
+**equivalent** — the mutated code cannot be told apart from the original by any
+input — with the reasoning written beside each. Writing a test for one of those
+would mean writing a test that passes either way, which is the defect this whole
+exercise exists to remove.
+
+A scheduled workflow re-runs the generator, so this table is measured rather than
+remembered.
 
 ## The writer created what the merge had just folded in
 
