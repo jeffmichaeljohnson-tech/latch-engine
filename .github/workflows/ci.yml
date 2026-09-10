@@ -34,6 +34,41 @@ jobs:
             echo "--- TZ=$tz"
             TZ=$tz npx vitest run
           done
+      # The suite tests the repository. This tests the ARTIFACT -- the tarball a
+      # consumer actually installs -- which is a different thing and fails in
+      # different ways: a `files` entry that drops a directory, an `exports` map
+      # that points at something not shipped, a type declaration left behind.
+      # None of those can fail a test run inside the repo, where every file is
+      # present whether it ships or not.
+      #
+      # It also re-checks a claim the README makes in prose. The README states
+      # that `npm install latch-engine && npx tsx example.ts` prints a specific
+      # line. Prose cannot fail on its own, so the claim is asserted here and the
+      # README becomes wrong loudly rather than quietly.
+      - name: the published tarball installs and runs
+        run: |
+          set -e
+          npm pack --pack-destination "$RUNNER_TEMP" >/dev/null
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null
+          npm i ./latch-engine-*.tgz >/dev/null
+          npm i -D tsx >/dev/null
+          # Quoted heredoc: the assertion below contains ${...} template
+          # literals, and an unquoted one lets the shell eat them.
+          cat > smoke.ts <<'SMOKE'
+          import { matchNameservers } from "latch-engine";
+          const got = matchNameservers(["aida.ns.cloudflare.com"]);
+          const want = { id: "cloudflare", displayName: "Cloudflare", treatment: "cloudflare" };
+          const a = JSON.stringify(got), b = JSON.stringify(want);
+          if (a !== b) throw new Error(`README claims ${b}, published package gives ${a}`);
+          console.log("published package resolves and computes:", a);
+          SMOKE
+          npx tsx smoke.ts
+          # And the tarball must not ship tests.
+          if tar tzf ./latch-engine-*.tgz | grep -q 'test\.ts'; then
+            echo "the tarball ships test files"; exit 1
+          fi
+          echo "tarball carries no test files"
       - name: the mutation runner's own suite
         run: npm run test:mutation-runner
       - name: mutation
