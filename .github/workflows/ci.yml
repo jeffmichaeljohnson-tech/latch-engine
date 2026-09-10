@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   pull_request:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

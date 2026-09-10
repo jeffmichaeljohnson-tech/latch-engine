@@ -26,7 +26,8 @@
   "files": [
     "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "!src/**/*.test.ts"
   ],
   "engines": {
     "node": ">=20"
