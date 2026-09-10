@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ProviderIdentity } from "./ns-map";
-import { matchNameservers, normalizeNs } from "./ns-map";
+import type { ProviderIdentity } from "../../src/detect/ns-map";
+import { matchNameservers, normalizeNs } from "../../src/detect/ns-map";
 
 /**
  * One REAL authoritative nameserver hostname per provider, per pattern, pinned
