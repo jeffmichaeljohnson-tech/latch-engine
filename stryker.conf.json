@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/api/schema/stryker-core.json",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": { "command": "npx vitest run" },
+  "mutate": ["src/**/*.ts", "!src/**/*.test.ts"],
+  "reporters": ["clear-text", "json"],
+  "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
+  "coverageAnalysis": "off",
+  "timeoutMS": 180000,
+  "concurrency": 6
+}

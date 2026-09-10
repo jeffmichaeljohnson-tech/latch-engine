@@ -64,7 +64,7 @@ jobs:
       # harmless, or it can return a number, which is neither. This step refuses
       # the second. The curated set is the second witness -- it invokes the test
       # command as a subprocess and cannot be fooled by a runner integration --
-      # so if the generated report says a curated file killed NOTHING, the two
+      # so if the generated report says a curated file caught NOTHING, the two
       # disagree and the curated one is the one that ran the tests.
       #
       # Exit 1 means the harness is suspect and the score must not be published.

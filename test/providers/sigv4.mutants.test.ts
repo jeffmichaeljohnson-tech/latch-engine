@@ -84,7 +84,7 @@ describe("body default", () => {
 
   it("RULE + NEGATIVE CONTROL: a real body changes the signature", async () => {
     // The body genuinely participates, so the equality above is not vacuous.
-    // Also kills `input.body && ""`: with it, a real body collapses to "" and
+    // Also catches `input.body && ""`: with it, a real body collapses to "" and
     // would sign the same as the empty body.
     const withBody = await sig({ body: "a-real-payload" });
     const empty = await sig({ body: "" });

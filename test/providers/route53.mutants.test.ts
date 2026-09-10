@@ -91,7 +91,7 @@ describe("readAuth (via apply)", () => {
   ];
   for (const [field, auth] of missing) {
     it(`rejects provider_auth_failed when ${field} is missing (guard block not emptied)`, async () => {
-      // Also kills emptying the throw block (L47) to {}: with no throw, apply
+      // Also catches emptying the throw block (L47) to {}: with no throw, apply
       // would proceed to sign/fetch with undefined creds instead of rejecting.
       const fetchMock = stubFetch();
       const err = await new Route53Adapter()

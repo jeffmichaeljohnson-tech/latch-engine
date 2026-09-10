@@ -7,7 +7,7 @@ import { matchNameservers, normalizeNs } from "../../src/detect/ns-map";
  * to the WHOLE provider identity rather than just its id.
  *
  * This file exists because a generated mutation run scored `ns-map.ts` at
- * 30.20% — 141 surviving mutants against 61 killed, the worst file in the
+ * 30.20% — 141 surviving mutants against 61 caught, the worst file in the
  * package by a wide margin. The table was reached only incidentally, through
  * higher-level detection tests that happened to use two or three hosts, so a
  * mutant could rewrite the Route 53 pattern or delete Porkbun's second suffix

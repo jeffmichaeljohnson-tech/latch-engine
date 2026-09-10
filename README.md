@@ -92,13 +92,13 @@ It reports four verdicts, and the third is why it exists:
 
 | verdict | meaning |
 |---|---|
-| `KILLED` | the suite ran and failed — the mutation is caught |
+| `CAUGHT` | the suite ran and failed — the mutation is caught |
 | `SURVIVED` | the suite ran and passed — nothing pins this behaviour |
 | `INCONCLUSIVE` | non-zero exit, but no evidence any test ran |
 | `NOT-APPLIED` | the pattern was absent, or matched more than once |
 
 A mutation that stops the code compiling also exits non-zero. A runner reading
-only the exit code scores that as a kill it never earned, so a spec declares a
+only the exit code scores that as a catch it never earned, so a spec declares a
 marker the test runner prints only when tests actually execute, and a non-zero
 exit without it is `INCONCLUSIVE` — never counted as caught.
 
@@ -119,13 +119,20 @@ proves that my imagination and my tests agree. They always do. The number below
 is the one a reviewer gets:
 
 ```
-npm i -D @stryker-mutator/core@^9 @stryker-mutator/vitest-runner@^9
-npx stryker run
+npm i -D @stryker-mutator/core@^9
+npx stryker run     # uses the committed stryker.conf.json — see the note below
 ```
 
-**3,135 generated mutants, 2,967 caught — 94.93%.** Stryker builds its own
+**3,135 generated mutants, 2,976 caught — 94.93%.** Stryker builds its own
 mutants from the syntax tree rather than from a list, which is how the case
 nobody thought to write down gets found.
+
+The 2,976 is 2,966 caught outright plus 10 caught by timeout. Stryker reports
+those separately and counts both as detected, which is right: a mutant that sends
+the suite into a loop the harness had to interrupt is a mutant the suite noticed.
+The outright figure alone would be 94.61%, and two numbers one line apart that do
+not reconcile are exactly what a reader should be able to close without asking, so
+the arithmetic is written out rather than asserted.
 
 | area | score |
 |---|---|
@@ -167,6 +174,43 @@ exercise exists to remove.
 
 A scheduled workflow re-runs the generator, so this table is measured rather than
 remembered.
+
+### Reproducing that number — the runner matters
+
+Use the **command** runner, not Stryker's vitest runner. `stryker.conf.json` in
+this repository is the config that produced the table above, so `npx stryker run`
+picks it up with no arguments.
+
+This is not a preference. Stryker's vitest runner declares `vitest: ">=2.0.0"`,
+installs happily against the vitest 5 this package now ships, and then reports
+whole files at 0.00% with every mutant surviving **while all 817 tests pass**.
+`connect.ts` reads 0.00% with 201 survivors under it, and 98.01% under the command
+runner. On one commit with nothing changed but the vitest version it scored this
+package at **12.38%** — 388 of 3,135. Anyone who runs `npx stryker run` with the
+default vitest runner gets that number and reasonably concludes the 94.93% above
+is a fabrication.
+
+It is not, and the check is cheap. The command runner shells out to
+`npx vitest run` per mutant, so a broken runner integration cannot fool it: a
+mutant counts as caught only if a real suite really failed. It reproduces the
+94.93% **exactly** on vitest 5, and all seven directories in the table above match
+to the second decimal. The same figures came from vitest 2 with the vitest runner.
+
+| | vitest 2 + vitest runner | vitest 5 + command runner | vitest 5 + vitest runner |
+|---|---|---|---|
+| score | 94.93% | 94.93% | 12.38% |
+| caught | 2,976 of 3,135 | 2,976 of 3,135 | 388 of 3,135 |
+| directories agreeing | — | 7 of 7 | 0 of 7 |
+
+The third column is the one worth keeping. It is not a worse measurement of this
+package; it is not a measurement of this package at all, and it is indistinguishable
+from one by looking. That is the argument for the harness check.
+
+The workflow runs `scripts/check-mutation-harness.mjs`, which refuses to publish a
+score the harness did not earn: the curated set in `mutations.json` invokes the
+test command as a subprocess and cannot be fooled the same way, so when a
+generated report claims a curated file caught nothing, the two witnesses disagree
+and the run fails rather than printing a number.
 
 ## The writer created what the merge had just folded in
 
